@@ -27,6 +27,7 @@ class Program
     // Starts the TCP server and begins listening for client connections
     private static void StartServer(TcpListener listener)
     {
+        Console.Clear();
         listener.Start();
         Console.WriteLine("Server started...\n");
     }

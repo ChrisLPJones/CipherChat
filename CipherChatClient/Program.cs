@@ -16,9 +16,9 @@ class Program
 
     // Variables for managing user input, username and encryption key
     private static string currentInput = "";
-    private static string userName = "";
+    private static string userName;
     private static int currentCursorPosition = 0;
-    private static string encryptionKey = "";
+    private static string encryptionKey;
 
     static async Task Main()
     {
@@ -27,7 +27,8 @@ class Program
         AppDomain.CurrentDomain.ProcessExit += (sender, e) => OnProcessExit();
 
         // Step 1: Gather the user's username and encryption key
-        GetUserName();
+        //GetUserName();
+        GetLogin();
 
         // Step 2: Connect to the chat server
         await ConnectToServer();
@@ -44,19 +45,42 @@ class Program
     }
 
     // Prompt the user for their username and encryption key
-    private static void GetUserName()
-    {
-        Console.Write("Enter Username: ");
-        userName = Console.ReadLine() ?? "Anonymous";
-        encryptionKey = GetPassword(encryptionKey);
+    private static void GetLogin(){
+        
         Console.Clear();
+        
+        // Check if empty username
+        while(string.IsNullOrWhiteSpace(userName)){
+            Console.Write("Enter username: ");
+            userName = Console.ReadLine();
+            Console.Clear();
+            if(userName.Length > 0){
+                break;
+            }
+            Console.SetCursorPosition(0, 1);
+            Console.WriteLine("A username is required to proceed.");
+            Console.SetCursorPosition(0, 0);
+        }
+        
+        // Check if empty Encryption key
+        while(string.IsNullOrWhiteSpace(encryptionKey)){
+            Console.Write("Enter encryption key: ");
+            encryptionKey = GetPassword();
+            Console.Clear();
+            if(encryptionKey.Length > 0){
+                break;
+            }
+            Console.SetCursorPosition(0,1);
+            Console.WriteLine("The encryption key is required to proceed.");
+            Console.SetCursorPosition(0, 0);
+        }
     }
 
     // Securely collect the encryption key while hiding input from display
-    private static string GetPassword(string encryptionKey)
+    private static string GetPassword()
     {
+        string encryptionKey = string.Empty;
         ConsoleKeyInfo keyInfo;
-        Console.Write("Enter encryption key: ");
         do
         {
             keyInfo = Console.ReadKey(intercept: true);
@@ -100,7 +124,7 @@ class Program
     // Continuously receive and decrypt messages from the server
     private static async Task ReceiveMessages()
     {
-        while (true)
+        while (client.Connected)
         {
             try
             {
@@ -140,6 +164,8 @@ class Program
                 Console.WriteLine($"Error receiving message: {ex.Message}");
                 break;
             }
+
+            client.Close();
         }
     }
 
@@ -277,5 +303,7 @@ class Program
             SendMessage($"{userName} has Disconnected");
             client.Close();
         }
+        
+        Console.Clear();
     }
 }
