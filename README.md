@@ -11,6 +11,16 @@ for secure communication between users.
 - Password-protected encryption keys.
 - All users connect using a shared pre-defined encryption key for secure communication.
 
+## Screenshots
+
+| Login | Connected | Chat |
+|---|---|---|
+| ![Login](docs/screenshots/login.png) | ![Connected](docs/screenshots/connected.png) | ![Chat](docs/screenshots/chat.png) |
+
+Two clients in the same conversation:
+
+![Two clients](docs/screenshots/two-clients.png)
+
 ## Getting Started
 
 Follow these instructions to set up and run CipherChat on your system.
