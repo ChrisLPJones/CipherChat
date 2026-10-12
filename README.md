@@ -36,7 +36,7 @@ Follow these instructions to set up and run CipherChat on your system.
 
 1. Navigate to the server directory:
    ```bash
-   cd ConsoleChatServer
+   cd CipherChatServer
    ```
 
 2. Run the server:
@@ -48,7 +48,7 @@ Follow these instructions to set up and run CipherChat on your system.
 
 1. Navigate to the client directory:
    ```bash
-   cd ConsoleChatClient
+   cd CipherChatClient
    ```
 
 2. Run the client:

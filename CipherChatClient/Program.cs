@@ -110,7 +110,7 @@ class Program
             stream = client.GetStream();
 
             string cipherText = AESecureString.EncryptString($"{userName} is Connected", encryptionKey);
-            byte[] userConnectedCipherBytes = Encoding.ASCII.GetBytes(cipherText);
+            byte[] userConnectedCipherBytes = Encoding.ASCII.GetBytes(cipherText + "\n");
             await stream.WriteAsync(userConnectedCipherBytes);
 
             Console.WriteLine("Connected to the server...");
@@ -124,39 +124,35 @@ class Program
     // Continuously receive and decrypt messages from the server
     private static async Task ReceiveMessages()
     {
+        StreamReader reader = new(stream);
+
         while (client.Connected)
         {
             try
             {
-                byte[] buffer = new byte[1024];
-                int bytesRead = await stream.ReadAsync(buffer);
+                // Read one newline-delimited message at a time
+                string line = await reader.ReadLineAsync();
 
-                if (bytesRead > 0)
+                // Exit the loop if the server closes the connection
+                if (line == null) break;
+
+                try
                 {
-                    string receivedData = Encoding.ASCII.GetString(buffer, 0, bytesRead);
-                    string[] lines = receivedData.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                    string plainText = AESecureString.DecryptCipher(line.Trim(), encryptionKey);
 
-                    foreach (var line in lines)
+                    lock (messages)
                     {
-                        try
+                        if (plainText != string.Empty)
                         {
-                            string plainText = AESecureString.DecryptCipher(line.Trim(), encryptionKey);
-
-                            lock (messages)
-                            {
-                                if (plainText != string.Empty)
-                                {
-                                    messages.Add(plainText);
-                                    DisplayMessages();
-                                    DisplayInputLine();
-                                }
-                            }
-                        }
-                        catch (FormatException)
-                        {
-                            Console.WriteLine("Received invalid Base64 message, skipping...");
+                            messages.Add(plainText);
+                            DisplayMessages();
+                            DisplayInputLine();
                         }
                     }
+                }
+                catch (FormatException)
+                {
+                    Console.WriteLine("Received invalid Base64 message, skipping...");
                 }
             }
             catch (Exception ex)
@@ -164,8 +160,6 @@ class Program
                 Console.WriteLine($"Error receiving message: {ex.Message}");
                 break;
             }
-
-            client.Close();
         }
     }
 
@@ -177,7 +171,7 @@ class Program
             try
             {
                 string cipherText = AESecureString.EncryptString(message, encryptionKey);
-                byte[] buffer = Encoding.ASCII.GetBytes(cipherText);
+                byte[] buffer = Encoding.ASCII.GetBytes(cipherText + "\n");
                 stream?.WriteAsync(buffer, 0, buffer.Length);
 
                 lock (messages)
