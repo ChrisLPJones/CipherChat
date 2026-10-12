@@ -58,11 +58,11 @@ class Program
         try
         {
             NetworkStream stream = client.GetStream();
+            StreamReader reader = new(stream);
 
-            // Step 1: Read the encrypted username from the connected client
-            byte[] userNameBuffer = new byte[1024];
-            int userNameBytesRead = stream.Read(userNameBuffer, 0, userNameBuffer.Length);
-            encryptedUserName = Encoding.ASCII.GetString(userNameBuffer, 0, userNameBytesRead).Trim();
+            // Step 1: Read the encrypted username (one newline-delimited line) from the connected client
+            string userNameLine = reader.ReadLine();
+            encryptedUserName = userNameLine?.Trim() ?? "";
 
             // Step 2: Add the client's encrypted username to the connected users list
             lock (clientsConnected)
@@ -81,14 +81,14 @@ class Program
             {
                 try
                 {
-                    byte[] buffer = new byte[1024];
-                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                    // Read one newline-delimited message at a time
+                    string line = reader.ReadLine();
 
                     // Exit the loop if the client disconnects (no data received)
-                    if (bytesRead == 0) break;
+                    if (line == null) break;
 
                     // Broadcast the received message to all other clients
-                    BroadcastMessage(client, Encoding.ASCII.GetString(buffer, 0, bytesRead));
+                    BroadcastMessage(client, line);
                 }
                 catch (IOException)
                 {
@@ -144,7 +144,8 @@ class Program
     private static void BroadcastMessage(TcpClient sender, string encryptedMessage)
     {
         
-        byte[] buffer = Encoding.ASCII.GetBytes(encryptedMessage);
+        // Append a newline so every server-to-client unit is exactly one line
+        byte[] buffer = Encoding.ASCII.GetBytes(encryptedMessage + "\n");
 
         lock (clients)
         {
