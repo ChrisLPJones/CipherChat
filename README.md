@@ -10,6 +10,7 @@ for secure communication between users.
 - Multi-user chat functionality with real-time message broadcasting.
 - Password-protected encryption keys.
 - All users connect using a shared pre-defined encryption key for secure communication.
+- Multiple rooms, each with its own key, plus the default `general` channel.
 - Private (direct) messages between two users with their own pair key, invisible to the rest of the chat and unreadable to the server.
 
 ## Screenshots
@@ -72,10 +73,12 @@ Follow these instructions to set up and run CipherChat on your system.
 3. Enter your username and the shared encryption key to connect. You land in the `general` channel.
 
 4. Commands (type them in the message line; start a message with `//` to send a literal `/`):
+   - `/join <room>`: join (or create) a room. You are asked for the **room key** (masked); everyone in the room must type the same key. A blank key reuses your login key. Room names are case-insensitive, up to 32 characters of letters, digits, `_`, `.`, `-`. A wrong key opens a different, empty room (you see "You are alone in ..."). You can be in at most 16 channels at once.
+   - `/leave [room]`: leave a room or private chat (default: the active one). The lobby `general` cannot be left.
    - `/dm <user>`: open a private chat. You are asked for a **pair key** (masked). You and the other user must type the *same* pair key, which you agree on out of band (e.g. in person or over another secure channel). Nothing is exchanged through the server. A blank key cancels.
-   - `/switch <name|n>`, or PgUp/PgDn: change the active channel. The header row lists channels; a number in brackets is the unread count.
+   - `/switch <name|n>`, or PgUp/PgDn: change the active channel. The header row lists channels; a number in brackets is the unread count of channels you are not looking at.
    - `/users` (members of the active channel), `/help`, `/quit` (or Esc).
-   - `/join`, `/leave`, `/history` are reserved for later versions.
+   - `/history` is reserved for a later version.
 
    A private chat only works if **both** sides ran `/dm <other user>` with the same pair key: the server cannot tell a user to open a chat, and a wrong key silently opens a different, empty channel (the client warns "You are alone in ..." when nobody else is in it).
 

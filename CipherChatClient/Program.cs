@@ -50,7 +50,9 @@ class Program
             Console.WriteLine($"Failed to connect to {serverHost}:{serverPort}: {ex.Message}");
             return 1;
         }
+        session.Active = active;
         Redraw();
+        StartResizeWatcher();
 
         // Step 3: Main loop to handle user input, commands and messages
         while (true)
@@ -72,6 +74,12 @@ class Program
                 case CommandKind.Dm:
                     await OpenDm(cmd.Arg);
                     break;
+                case CommandKind.Join:
+                    await JoinRoom(cmd.Arg);
+                    break;
+                case CommandKind.Leave:
+                    LeaveChannel(cmd.Arg);
+                    break;
                 case CommandKind.Switch:
                     SwitchTo(cmd.Arg);
                     break;
@@ -79,13 +87,11 @@ class Program
                     ShowUsers();
                     break;
                 case CommandKind.Help:
-                    ShowStatus("Commands: /dm <user> (private chat; both type the same pair key), /switch <name|n> (or PgUp/PgDn), /users, /help, /quit. Start a message with // to send a literal /. Esc quits.");
+                    ShowStatus("Commands: /join <room> (asks for a room key; blank = login key), /leave [room], /dm <user> (private chat; both type the same pair key), /switch <name|n> (or PgUp/PgDn), /users, /help, /quit. Start a message with // to send a literal /. Esc quits.");
                     break;
                 case CommandKind.Quit:
                     Environment.Exit(0);
                     break;
-                case CommandKind.Join:
-                case CommandKind.Leave:
                 case CommandKind.History:
                     ShowStatus("That command is not available yet.");
                     break;
@@ -169,17 +175,7 @@ class Program
             return;
         }
 
-        string pairKey;
-        lock (ui)
-        {
-            suspendRedraw = true;
-            string prompt = $"Pair key with {peer} (agreed out of band; blank cancels): ";
-            Console.SetCursorPosition(0, Console.WindowHeight - 1);
-            Console.Write(prompt.PadRight(Math.Max(prompt.Length, Console.WindowWidth - 1)));
-            Console.SetCursorPosition(prompt.Length, Console.WindowHeight - 1);
-            pairKey = GetPassword();
-            suspendRedraw = false;
-        }
+        string pairKey = PromptSecret($"Pair key with {peer} (agreed out of band; blank cancels): ");
         if (pairKey.Length == 0) { ShowStatus("Private chat cancelled."); return; }
 
         ShowStatus($"Opening private chat with {peer}...");
@@ -193,6 +189,86 @@ class Program
         {
             ShowStatus($"Could not open the private chat: {ex.Message}");
         }
+    }
+
+    // Masked prompt on the bottom line. Redraws are suspended while it is open, but the ui lock is NOT held
+    // during the blocking key read, so the receive thread (LineAdded -> Redraw) is never stalled behind the user's typing.
+    private static string PromptSecret(string prompt)
+    {
+        lock (ui)
+        {
+            suspendRedraw = true;
+            Console.SetCursorPosition(0, Console.WindowHeight - 1);
+            Console.Write(prompt.PadRight(Math.Max(prompt.Length, Console.WindowWidth - 1)));
+            Console.SetCursorPosition(prompt.Length, Console.WindowHeight - 1);
+        }
+        try
+        {
+            return GetPassword();
+        }
+        finally
+        {
+            lock (ui) suspendRedraw = false;
+        }
+    }
+
+    // /join <room>: prompt for the room key (masked); blank reuses the login key
+    private static async Task JoinRoom(string room)
+    {
+        string problem = MessageRules.ValidateRoomName(room);
+        if (problem != null) { ShowStatus(problem); return; }
+
+        string key = PromptSecret($"Key for room '{room}' (blank = your login key): ");
+        ShowStatus($"Joining {room}...");
+        try
+        {
+            ChannelState ch = await session.JoinRoomAsync(room, key);
+            Activate(ch);
+        }
+        catch (InvalidOperationException ex)
+        {
+            ShowStatus($"Could not join the room: {ex.Message}");
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        {
+            ShowStatus($"Could not join the room: {ex.Message}");
+        }
+    }
+
+    // /leave [room]: leave the named channel, or the active one
+    private static void LeaveChannel(string arg)
+    {
+        ChannelState target = string.IsNullOrEmpty(arg)
+            ? active
+            : session.Channels.FirstOrDefault(c => string.Equals(c.DisplayName, arg, StringComparison.OrdinalIgnoreCase));
+        if (target == null) { ShowStatus("No such channel. Channels: " + ChannelList()); return; }
+        string error = session.Leave(target);
+        if (error != null) { ShowStatus(error); return; }
+        if (target == active) Activate(session.Channels.First());
+        else Redraw();
+        ShowStatus($"Left {target.DisplayName}.");
+    }
+
+    // Terminal resize does not raise a key event; poll the size and redraw when it changes.
+    private static void StartResizeWatcher()
+    {
+        _ = Task.Run(async () =>
+        {
+            int w = Console.WindowWidth, h = Console.WindowHeight;
+            while (true)
+            {
+                await Task.Delay(300);
+                try
+                {
+                    if (Console.WindowWidth != w || Console.WindowHeight != h)
+                    {
+                        w = Console.WindowWidth; h = Console.WindowHeight;
+                        Redraw();
+                    }
+                }
+                catch (IOException) { }
+            }
+        });
     }
 
     private static void SwitchTo(string arg)
@@ -221,6 +297,7 @@ class Program
         lock (ui)
         {
             active = ch;
+            session.Active = ch;
             lock (ch.Messages) ch.Unread = 0;
         }
         Redraw();

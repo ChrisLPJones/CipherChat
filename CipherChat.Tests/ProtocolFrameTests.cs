@@ -174,6 +174,10 @@ public class CommandsTests
     [InlineData("/help", CommandKind.Help, "")]
     [InlineData("/quit", CommandKind.Quit, "")]
     [InlineData("/join lounge", CommandKind.Join, "lounge")]
+    [InlineData("/join", CommandKind.Join, "")]
+    [InlineData("/JOIN  Lounge ", CommandKind.Join, "Lounge")]
+    [InlineData("/leave", CommandKind.Leave, "")]
+    [InlineData("/leave lounge", CommandKind.Leave, "lounge")]
     [InlineData("/nope", CommandKind.Unknown, "nope")]
     public void Parse(string input, CommandKind kind, string arg)
     {
