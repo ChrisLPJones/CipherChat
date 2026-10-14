@@ -26,4 +26,12 @@ public sealed class ChannelState
     public int Unread { get; set; }
     public bool RosterComplete { get; set; }
     public int WrongKeyCount { get; set; }
+
+    // History replay state; touched on the receive thread only (except HistExplicit, set by /history).
+    public HashSet<long> SeenIds { get; } = [];                 // message ids already shown (live, own ACKed or replayed)
+    public List<ServerEvent> HistBatch { get; } = [];           // HIST records received since the last HISTEND
+    public List<ServerEvent> HistLive { get; } = [];            // live MSGs held back while the join replay is outstanding
+    public bool HistJoinPending { get; set; }                   // join replay requested, HISTEND not yet seen
+    public bool AloneHintPending { get; set; }                  // the "alone" hint waits for the replay result
+    public volatile bool HistExplicit;                          // the user typed /history
 }

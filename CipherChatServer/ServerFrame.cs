@@ -110,6 +110,7 @@ public static class ServerFrame
     public static string Left(string tag, int mid) => $"LEFT {tag} {mid}";
     public static string Msg(string tag, long id, string payload) => $"MSG {tag} {id} {payload}";
     public static string Ack(string tag, long id) => $"ACK {tag} {id}";
+    public static string Hist(string tag, long id, string payload) => $"HIST {tag} {id} {payload}";
     public static string HistEnd(string tag, long headId) => $"HISTEND {tag} {headId}";
     public const string Pong = "PONG";
     public static string Err(string code) => $"ERR {code}";

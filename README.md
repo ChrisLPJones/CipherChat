@@ -54,7 +54,10 @@ Follow these instructions to set up and run CipherChat on your system.
 2. Run the server:
    ```bash
    dotnet run
+   dotnet run -- localhost 3000 /var/lib/cipherchat/history   # optional: host, port, history directory
    ```
+
+   **History (opt-in).** Pass a directory as the third argument to keep the last 1000 messages per channel on disk (created with mode 0700, files 0600). Without it nothing is stored. When a client joins a channel it fetches the retained messages it has not seen and shows them marked `[history]`; `/history` fetches them again. See the Trust model for what is and is not protected.
 
 ### Running the Client
 
@@ -78,7 +81,7 @@ Follow these instructions to set up and run CipherChat on your system.
    - `/dm <user>`: open a private chat. You are asked for a **pair key** (masked). You and the other user must type the *same* pair key, which you agree on out of band (e.g. in person or over another secure channel). Nothing is exchanged through the server. A blank key cancels.
    - `/switch <name|n>`, or PgUp/PgDn: change the active channel. The header row lists channels; a number in brackets is the unread count of channels you are not looking at.
    - `/users` (members of the active channel), `/help`, `/quit` (or Esc).
-   - `/history` is reserved for a later version.
+   - `/history`: re-fetch the retained messages of the active channel (only if the server runs with a history directory).
 
    A private chat only works if **both** sides ran `/dm <other user>` with the same pair key: the server cannot tell a user to open a chat, and a wrong key silently opens a different, empty channel (the client warns "You are alone in ..." when nobody else is in it).
 
@@ -135,7 +138,7 @@ Old (v1/v2) and new clients and servers cannot talk to each other: upgrade all o
 | `JOIN <tag> <presence>` | join a channel; `presence` is the username encrypted under the channel key |
 | `LEAVE <tag>` | leave a channel |
 | `MSG <tag> <payload>` | send an encrypted message to the channel's other members |
-| `HIST <tag> <afterId> <max>` | request history (max 50); the server currently answers `ERR unsupported` |
+| `HIST <tag> <afterId> <max>` | request retained messages with id > `afterId` (last `max`, 1-50); `ERR unsupported` if the server keeps no history |
 | `PING` | the server answers `PONG` |
 
 **Server to client**
@@ -147,7 +150,7 @@ Old (v1/v2) and new clients and servers cannot talk to each other: upgrade all o
 | `JOINED <tag> <mid> <presence>` / `LEFT <tag> <mid>` | membership changes; `LEFT` is also sent when a connection drops (even a crash) |
 | `MSG <tag> <id> <payload>` | a message; `id` is a per-channel counter assigned by the server |
 | `ACK <tag> <id>` | to the sender: the id its message got |
-| `HIST <tag> <id> <payload>` ... `HISTEND <tag> <headId>` | reserved for history replay |
+| `HIST <tag> <id> <payload>` ... `HISTEND <tag> <headId>` | history replay, oldest first, then the end marker with the channel's current head id (a head lower than the client's last id means the server lost state) |
 | `PONG` | reply to `PING` |
 | `ERR <code>` | `version`, `notjoined`, `alreadyjoined`, `limit` (max 16 channels per connection), `unsupported` |
 
@@ -158,6 +161,7 @@ Old (v1/v2) and new clients and servers cannot talk to each other: upgrade all o
 - Transport is plain TCP: no TLS. Only payloads and presence blobs are encrypted client-side; framing, line lengths, timing, IP addresses and connection times are visible to anyone on the path. TLS is a deliberate, documented-only decision for now.
 - The server never holds a key and cannot read messages or usernames (inside the ciphertext). It sees: which opaque channel tag each connection joined, who is in each tag (as opaque per-connection numbers and encrypted presence blobs), message sizes, timing and IP addresses. It can tell that two connections share a channel, and can run an offline guess of a channel key against a tag (no cheaper than guessing against any ciphertext it relays).
 - The server does not log payloads, presence blobs, tags or IP addresses; it logs only unexpected errors. Treat the host as sensitive metadata all the same.
+- History at rest: the server stores exactly the opaque payloads clients produced (AES-256-GCM under keys the server never has), so history is encrypted at rest by construction; no server-side key exists (it would sit next to the data and add nothing). Files are named by the hex SHA-256 of the tag, so a directory listing does not yield usable channel tags. Still visible at rest to whoever reads the directory: that a channel exists, message count, sizes, order and server-side timestamps. No usernames, IPs or connection numbers are stored. Retained ciphertext can be attacked offline, so a weak key is a stored-data risk: use long random passphrases. Timestamps and ids in replays come from the server and are untrusted. The operator holds the history; delete the directory to erase it.
 - Private chats: the pair key is agreed out of band and is the only secret between the two users. The server is not involved in key agreement, so it cannot substitute keys, but a weak pair key can be guessed offline from any intercepted ciphertext. Use a long random passphrase. Anyone who knows the pair key can read and write the private chat and claim either name.
 - Anyone who can reach the port can connect, join tags and relay, inject, drop or replay lines. AES-GCM stops them reading or forging messages without the key, and the tag in the authenticated data stops moving a message to another channel, but not replay, dropping or flooding. Any holder of a channel key can claim any username (no sender authentication). Server-assigned ids are untrusted.
 - A leaked or weak key exposes all past and future traffic of its channels (PBKDF2 slows guessing, it does not prevent it). Keys live only in client memory; they are never sent, logged or stored. Run on loopback/LAN or inside a VPN/SSH tunnel.

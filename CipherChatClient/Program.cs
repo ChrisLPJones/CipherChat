@@ -87,13 +87,14 @@ class Program
                     ShowUsers();
                     break;
                 case CommandKind.Help:
-                    ShowStatus("Commands: /join <room> (asks for a room key; blank = login key), /leave [room], /dm <user> (private chat; both type the same pair key), /switch <name|n> (or PgUp/PgDn), /users, /help, /quit. Start a message with // to send a literal /. Esc quits.");
+                    ShowStatus("Commands: /join <room> (asks for a room key; blank = login key), /leave [room], /dm <user> (private chat; both type the same pair key), /switch <name|n> (or PgUp/PgDn), /users, /history (re-fetch the last retained messages if the server keeps history), /help, /quit. Start a message with // to send a literal /. Esc quits.");
                     break;
                 case CommandKind.Quit:
                     Environment.Exit(0);
                     break;
                 case CommandKind.History:
-                    ShowStatus("That command is not available yet.");
+                    string historyError = session.RequestHistory(active);
+                    if (historyError != null) ShowStatus(historyError);
                     break;
                 default:
                     ShowStatus($"Unknown command '/{cmd.Arg}'. Type /help.");
