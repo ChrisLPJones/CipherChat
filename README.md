@@ -61,10 +61,12 @@ Follow these instructions to set up and run CipherChat on your system.
    cd CipherChatClient
    ```
 
-2. Run the client:
+2. Run the client (optionally with the server's host and port, default `localhost 3000`; hostnames and IPs work, port 1-65535):
    ```bash
    dotnet run
+   dotnet run -- chat.example.com 4000
    ```
+   Invalid arguments print a usage message and exit before any prompt.
 
 3. Enter your username and the shared encryption key to connect.
 
