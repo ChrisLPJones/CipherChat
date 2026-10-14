@@ -1,89 +1,98 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace CipherChatClient
 {
+    // Thrown when the authentication tag does not match: wrong key or tampered data.
+    public class CipherAuthenticationException : CryptographicException
+    {
+        public CipherAuthenticationException(string message, Exception inner) : base(message, inner) { }
+    }
+
     public class AESecureString
     {
+        public const int Pbkdf2Iterations = 600_000;
+        public const int MaxPlaintextBytes = ProtocolLimits.MaxPlaintextBytes;
+
+        private const byte Version = 0x02;
+        private const int SaltSize = 16;
+        private const int NonceSize = 12;
+        private const int TagSize = 16;
+        private const int HeaderSize = 1 + SaltSize + NonceSize;
+
+        // Wire format (Base64 of): version(1)=0x02 | salt(16) | nonce(12) | ciphertext | tag(16)
+        // The version byte is authenticated as additional data.
         public static string EncryptString(string plainText, string key)
         {
-            // Convert the plain text message into a byte array
             byte[] plainTextBytes = Encoding.UTF8.GetBytes(plainText);
+            if (plainTextBytes.Length > MaxPlaintextBytes)
+                throw new ArgumentException($"Plaintext exceeds {MaxPlaintextBytes} bytes.", nameof(plainText));
 
-            // Generate a random 16-byte salt for this encryption
-            byte[] salt = new byte[16];
-            using (RandomNumberGenerator rng = RandomNumberGenerator.Create())
+            byte[] result = new byte[HeaderSize + plainTextBytes.Length + TagSize];
+            result[0] = Version;
+            Span<byte> salt = result.AsSpan(1, SaltSize);
+            Span<byte> nonce = result.AsSpan(1 + SaltSize, NonceSize);
+            RandomNumberGenerator.Fill(salt);
+            RandomNumberGenerator.Fill(nonce);
+
+            byte[] aesKey = Rfc2898DeriveBytes.Pbkdf2(key, salt.ToArray(), Pbkdf2Iterations, HashAlgorithmName.SHA256, 32);
+            try
             {
-                rng.GetBytes(salt); // Fill the salt with random bytes
+                using AesGcm gcm = new(aesKey, TagSize);
+                gcm.Encrypt(nonce, plainTextBytes,
+                    result.AsSpan(HeaderSize, plainTextBytes.Length),
+                    result.AsSpan(HeaderSize + plainTextBytes.Length, TagSize),
+                    result.AsSpan(0, 1));
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(aesKey);
             }
 
-            // Derive a 256-bit AES key from the passphrase and salt using PBKDF2 with 1000 iterations and SHA256
-            using Rfc2898DeriveBytes rfc = new(key, salt, 1000, HashAlgorithmName.SHA256);
-            byte[] saltedKeyBytes = rfc.GetBytes(32); // Generate a 256-bit key
-
-            // Create an AES encryption object with the derived key
-            using Aes aes = Aes.Create();
-            aes.KeySize = 256;
-            aes.GenerateIV(); // Generate a random IV for encryption
-            aes.Key = saltedKeyBytes;
-
-            // Encrypt the plaintext bytes using the AES encryptor
-            using ICryptoTransform encrypt = aes.CreateEncryptor();
-            byte[] cipherTextBytes = encrypt.TransformFinalBlock(plainTextBytes, 0, plainTextBytes.Length);
-
-            // Combine salt, IV, and ciphertext into a single array for easy transport/storage
-            byte[] result = new byte[salt.Length + aes.IV.Length + cipherTextBytes.Length];
-            Array.Copy(salt, 0, result, 0, salt.Length); // Copy salt to the beginning of result
-            Array.Copy(aes.IV, 0, result, salt.Length, aes.IV.Length); // Followed by IV
-            Array.Copy(cipherTextBytes, 0, result, salt.Length + aes.IV.Length, cipherTextBytes.Length); // And finally ciphertext
-
-            // Convert the combined byte array to a Base64 string for easy transmission
             return Convert.ToBase64String(result);
         }
 
+        // Throws FormatException (bad Base64, too short, unknown version) or
+        // CipherAuthenticationException (wrong key or tampered data).
         public static string DecryptCipher(string cipherText, string key)
         {
-            // Decode the Base64 encoded string back to a byte array
-            byte[] cipherBytes = Convert.FromBase64String(cipherText);
+            byte[] data = Convert.FromBase64String(cipherText); // FormatException on bad Base64
+            if (data.Length < HeaderSize + TagSize)
+                throw new FormatException("Ciphertext is too short.");
+            if (data[0] != Version)
+                throw new FormatException("Unknown ciphertext version.");
 
-            // Extract the salt from the beginning of the byte array
-            byte[] salt = new byte[16];
-            Array.Copy(cipherBytes, 0, salt, 0, salt.Length);
-
-            // Derive the AES key using the passphrase and extracted salt with PBKDF2
-            using Rfc2898DeriveBytes rfc = new(key, salt, 1000, HashAlgorithmName.SHA256);
-            byte[] saltedKeyBytes = rfc.GetBytes(32); // Regenerate the 256-bit key
-
-            // Create an AES decryption object with the derived key
-            using Aes aes = Aes.Create();
-            aes.KeySize = 256;
-            aes.Key = saltedKeyBytes;
-
-            // Extract the IV from the cipher bytes after the salt
-            byte[] iv = new byte[aes.BlockSize / 8];
-            Array.Copy(cipherBytes, salt.Length, iv, 0, iv.Length);
-            aes.IV = iv;
-
-            // Extract the actual encrypted data (ciphertext) following the salt and IV
-            byte[] actualCipherBytes = new byte[cipherBytes.Length - iv.Length - salt.Length];
-            Array.Copy(cipherBytes, salt.Length + iv.Length, actualCipherBytes, 0, actualCipherBytes.Length);
-
-            // Decrypt the ciphertext using the AES decryptor
-            using ICryptoTransform decrypt = aes.CreateDecryptor();
+            // Shape checks above run before the expensive KDF.
+            byte[] salt = data.AsSpan(1, SaltSize).ToArray();
+            int cipherLength = data.Length - HeaderSize - TagSize;
+            byte[] aesKey = Rfc2898DeriveBytes.Pbkdf2(key, salt, Pbkdf2Iterations, HashAlgorithmName.SHA256, 32);
+            byte[] plain = new byte[cipherLength];
             try
             {
-                byte[] plainTextBytes = decrypt.TransformFinalBlock(actualCipherBytes, 0, actualCipherBytes.Length);
-                string plainText = Encoding.UTF8.GetString(plainTextBytes); // Convert decrypted bytes back to string
-                return plainText;
+                using AesGcm gcm = new(aesKey, TagSize);
+                gcm.Decrypt(data.AsSpan(1 + SaltSize, NonceSize),
+                    data.AsSpan(HeaderSize, cipherLength),
+                    data.AsSpan(HeaderSize + cipherLength, TagSize),
+                    plain,
+                    data.AsSpan(0, 1));
             }
-            catch (CryptographicException)
+            catch (AuthenticationTagMismatchException ex)
             {
-                // Catch any errors that occur during decryption (e.g., wrong key or corrupt data)
-                return string.Empty; // Return an empty string if decryption fails
+                throw new CipherAuthenticationException("Authentication failed: wrong key or corrupted data.", ex);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(aesKey);
+            }
+
+            try
+            {
+                return new UTF8Encoding(false, true).GetString(plain);
+            }
+            catch (DecoderFallbackException ex)
+            {
+                throw new FormatException("Decrypted data is not valid UTF-8.", ex);
             }
         }
     }
