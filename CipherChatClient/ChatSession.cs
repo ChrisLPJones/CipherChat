@@ -31,6 +31,9 @@ public sealed class ChatSession : IDisposable
     // The channel the user is looking at; its new messages are not counted as unread. Set by the UI.
     public ChannelState Active { get; set; }
     public int Mid { get; private set; }
+    // Set once the server answered HIST with ERR unsupported (it was started without a history directory).
+    public bool HistoryUnsupported => Volatile.Read(ref historyUnsupported) == 1;
+    private int historyUnsupported;
     public bool IsClosed => Volatile.Read(ref closed) == 1;
 
     // A line to show in a channel (chat text, joins/leaves, hints). Raised on the receive thread.
@@ -163,6 +166,24 @@ public sealed class ChatSession : IDisposable
         }
     }
 
+    // /history: asks the server for the last retained messages of a channel (at most MaxHistoryReplay; the
+    // protocol has no "before" cursor). Already shown messages are skipped by id. Returns an error text or null.
+    public string RequestHistory(ChannelState ch)
+    {
+        if (IsClosed) return "Not connected. Press Esc to quit and start the client again.";
+        if (HistoryUnsupported) return "This server keeps no message history (it was started without a history directory).";
+        try
+        {
+            ch.HistExplicit = true;
+            WriteLine(ClientFrame.Hist(ch.Tag, 0, ProtocolLimits.MaxHistoryReplay));
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        {
+            return $"Error requesting history: {ex.Message}";
+        }
+    }
+
     // Shows a local (system) line in a channel.
     public void AddLocal(ChannelState ch, string text) => AddLine(ch, text, unread: false);
 
@@ -224,7 +245,7 @@ public sealed class ChatSession : IDisposable
     }
 
     // Applies one server event. Decryption (PBKDF2 per blob) runs on the receive thread.
-    internal void Handle(ServerEvent ev)
+    public void Handle(ServerEvent ev)
     {
         switch (ev.Kind)
         {
@@ -245,8 +266,18 @@ public sealed class ChatSession : IDisposable
                     ch.RosterComplete = true;
                     int others;
                     lock (ch.Members) others = ch.Members.Count - 1;
-                    if (others == 0)
-                        AddLine(ch, $"You are alone in {ch.DisplayName}. If others should be here, check the name and the key (a wrong key opens a different, empty channel).", unread: false);
+                    if (HistoryUnsupported)
+                    {
+                        if (others == 0) AddLine(ch, AloneHint(ch), unread: false);
+                    }
+                    else
+                    {
+                        // Ask for the join replay; live messages are held back until it ends so history comes first.
+                        // The "alone" hint waits for the result: replayed messages prove the key is right.
+                        ch.HistJoinPending = true;
+                        ch.AloneHintPending = others == 0;
+                        WriteLine(ClientFrame.Hist(ch.Tag, ch.LastId, ProtocolLimits.MaxHistoryReplay));
+                    }
                 }
                 break;
             }
@@ -266,35 +297,127 @@ public sealed class ChatSession : IDisposable
             {
                 ChannelState ch = Find(ev.Tag);
                 if (ch == null) return;
-                ch.LastId = ev.Id;
-                switch (MessageRules.TryDecrypt(ev.Data, ch.Key, ch.Tag, out string plain))
-                {
-                    case DecryptStatus.Ok:
-                        AddLine(ch, MessageRules.SanitizeForDisplay(plain), unread: true);
-                        break;
-                    case DecryptStatus.WrongKey:
-                        // First failure then every 10th; never disconnect
-                        if (ch.WrongKeyCount++ % 10 == 0)
-                            AddLine(ch, "Could not decrypt a message: it was tampered with or moved from another channel.", unread: false);
-                        break;
-                    default:
-                        AddLine(ch, "Malformed message ignored.", unread: false);
-                        break;
-                }
+                if (ch.HistJoinPending) { if (ch.HistLive.Count < 1000) ch.HistLive.Add(ev); return; }
+                ShowLive(ch, ev);
+                break;
+            }
+            case ServerEventKind.Hist:
+            {
+                ChannelState ch = Find(ev.Tag);
+                if (ch != null && ch.HistBatch.Count < ProtocolLimits.MaxHistoryReplay) ch.HistBatch.Add(ev);
+                break;
+            }
+            case ServerEventKind.HistEnd:
+            {
+                ChannelState ch = Find(ev.Tag);
+                if (ch != null) FinishHistory(ch, ev.Id);
                 break;
             }
             case ServerEventKind.Ack:
             {
                 ChannelState ch = Find(ev.Tag);
-                if (ch != null) ch.LastId = Math.Max(ch.LastId, ev.Id);
+                if (ch != null)
+                {
+                    ch.LastId = Math.Max(ch.LastId, ev.Id);
+                    ch.SeenIds.Add(ev.Id); // our own message: never shown again as history
+                }
                 break;
             }
             case ServerEventKind.Err:
-                Status?.Invoke($"Server error: {ev.Data}");
+                if (ev.Data == "unsupported")
+                {
+                    // The reply to HIST on a server without history: stop waiting for replays
+                    Interlocked.Exchange(ref historyUnsupported, 1);
+                    Status?.Invoke("This server keeps no message history (it was started without a history directory).");
+                    foreach (ChannelState c in Channels)
+                    {
+                        c.HistExplicit = false;
+                        c.HistBatch.Clear();
+                        if (c.HistJoinPending) FinishHistory(c, null);
+                    }
+                }
+                else Status?.Invoke($"Server error: {ev.Data}");
                 break;
-            // Hist/HistEnd/Pong arrive only once those features exist; ignored for now.
+            // Pong is not used yet.
         }
     }
+
+    // Shows one live message (decrypts it), skipping ids already shown.
+    private void ShowLive(ChannelState ch, ServerEvent ev)
+    {
+        if (!ch.SeenIds.Add(ev.Id)) return;
+        ch.LastId = ev.Id;
+        switch (MessageRules.TryDecrypt(ev.Data, ch.Key, ch.Tag, out string plain))
+        {
+            case DecryptStatus.Ok:
+                AddLine(ch, MessageRules.SanitizeForDisplay(plain), unread: true);
+                break;
+            case DecryptStatus.WrongKey:
+                // First failure then every 10th; never disconnect
+                if (ch.WrongKeyCount++ % 10 == 0)
+                    AddLine(ch, "Could not decrypt a message: it was tampered with or moved from another channel.", unread: false);
+                break;
+            default:
+                AddLine(ch, "Malformed message ignored.", unread: false);
+                break;
+        }
+    }
+
+    // End of a replay (headId null = the server has no history). Shows the new records oldest first, then
+    // any live messages that arrived meanwhile, then the deferred hints.
+    private void FinishHistory(ChannelState ch, long? headId)
+    {
+        List<ServerEvent> batch = ch.HistBatch.OrderBy(e => e.Id).ToList();
+        ch.HistBatch.Clear();
+        int shown = 0, failed = 0;
+
+        if (headId is long head && head < ch.LastId)
+        {
+            // The server lost its state (restarted without history): ids start over, so forget the old ones
+            ch.LastId = head;
+            ch.SeenIds.Clear();
+        }
+
+        var fresh = batch.Where(e => !ch.SeenIds.Contains(e.Id)).DistinctBy(e => e.Id).ToList();
+        // One PBKDF2 per record: decrypt in parallel, keep the order
+        var decrypted = fresh.AsParallel().AsOrdered()
+            .Select(e => (e.Id, Status: MessageRules.TryDecrypt(e.Data, ch.Key, ch.Tag, out string plain), Plain: plain))
+            .ToList();
+        foreach (var d in decrypted)
+        {
+            ch.SeenIds.Add(d.Id);
+            ch.LastId = Math.Max(ch.LastId, d.Id);
+            if (d.Status == DecryptStatus.Ok)
+            {
+                AddLine(ch, "[history] " + MessageRules.SanitizeForDisplay(d.Plain), unread: false);
+                shown++;
+            }
+            else failed++;
+        }
+        if (failed > 0)
+            AddLine(ch, $"{failed} history message(s) could not be decrypted (tampered with or from another channel).", unread: false);
+
+        bool explicitRequest = ch.HistExplicit;
+        ch.HistExplicit = false;
+        if (explicitRequest && headId != null && shown == 0 && failed == 0)
+            AddLine(ch, "No further history to show (at most the last " + ProtocolLimits.MaxHistoryReplay + " retained messages can be fetched).", unread: false);
+
+        if (ch.HistJoinPending)
+        {
+            ch.HistJoinPending = false;
+            List<ServerEvent> held = ch.HistLive.ToList();
+            ch.HistLive.Clear();
+            foreach (ServerEvent e in held) ShowLive(ch, e);
+        }
+        if (ch.AloneHintPending)
+        {
+            ch.AloneHintPending = false;
+            AddLine(ch, shown > 0 ? $"You are alone in {ch.DisplayName} right now." : AloneHint(ch), unread: false);
+        }
+    }
+
+    private static string AloneHint(ChannelState ch) =>
+        $"You are alone in {ch.DisplayName}. If others should be here, check the name and the key (a wrong key opens a different, empty channel).";
 
     private static string DecryptPresence(ChannelState ch, string blob)
     {

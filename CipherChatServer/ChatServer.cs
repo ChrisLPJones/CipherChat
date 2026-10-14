@@ -18,6 +18,7 @@ public class ChatServer : IDisposable
     private readonly List<Connection> clients = [];
     private readonly Dictionary<string, Channel> channels = [];
     private int nextMid;
+    private readonly HistoryStore history;   // null = history disabled (opt-in)
 
     private readonly TcpListener listener;
     private readonly TaskCompletionSource<bool> stopped = new();
@@ -30,11 +31,15 @@ public class ChatServer : IDisposable
     // Completes when Stop() has finished shutting the server down
     public Task Stopped => stopped.Task;
 
-    public ChatServer(string host, int port)
+    public ChatServer(string host, int port, ChatServerOptions options = null)
     {
         IPAddress address = host == "localhost" ? IPAddress.Loopback : IPAddress.Parse(host);
         listener = new(address, port);
+        if (options?.HistoryDirectory != null)
+            history = new HistoryStore(options.HistoryDirectory, options.MaxPerChannel);
     }
+
+    public bool HistoryEnabled => history != null;
 
     // Starts the TCP server listening and begins accepting client connections
     public void Start()
@@ -154,7 +159,7 @@ public class ChatServer : IDisposable
                     if (conn.Joined.Count >= ProtocolLimits.MaxChannelsPerClient) { conn.Send(ServerFrame.Err("limit")); return true; }
 
                     if (!channels.TryGetValue(cmd.Tag, out Channel channel))
-                        channels[cmd.Tag] = channel = new Channel();
+                        channels[cmd.Tag] = channel = new Channel { LastId = SafeHead(cmd.Tag) };
 
                     // Roster: everyone already in the channel, then the joiner itself last
                     // (clients use the self entry as the end-of-roster marker).
@@ -182,6 +187,7 @@ public class ChatServer : IDisposable
                     if (!conn.Joined.ContainsKey(cmd.Tag)) { conn.Send(ServerFrame.Err("notjoined")); return true; }
                     Channel channel = channels[cmd.Tag];
                     long id = ++channel.LastId;
+                    SafeAppend(cmd.Tag, id, cmd.Data);
                     foreach (Connection m in channel.Members)
                         if (m != conn) m.Send(ServerFrame.Msg(cmd.Tag, id, cmd.Data));
                     conn.Send(ServerFrame.Ack(cmd.Tag, id));
@@ -189,15 +195,52 @@ public class ChatServer : IDisposable
                 return true;
 
             case ClientVerb.Hist:
+            {
+                long head;
                 lock (sync)
                 {
-                    // History is a later feature; the grammar is already fixed.
-                    conn.Send(ServerFrame.Err(conn.Joined.ContainsKey(cmd.Tag) ? "unsupported" : "notjoined"));
+                    if (!conn.Joined.ContainsKey(cmd.Tag)) { conn.Send(ServerFrame.Err("notjoined")); return true; }
+                    if (history == null) { conn.Send(ServerFrame.Err("unsupported")); return true; }
+                    head = channels[cmd.Tag].LastId;
                 }
+                // The (bounded) file read runs outside the registry lock so it cannot stall other clients.
+                // Live messages may interleave with the replay; clients de-duplicate by id.
+                List<HistoryRecord> records;
+                try { records = history.Read(cmd.Tag, cmd.AfterId, cmd.Max); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    Console.WriteLine($"History read failed: {ex.GetType().Name}");
+                    records = [];
+                }
+                foreach (HistoryRecord r in records) conn.Send(ServerFrame.Hist(cmd.Tag, r.Id, r.Payload));
+                conn.Send(ServerFrame.HistEnd(cmd.Tag, head));
                 return true;
+            }
 
             default:
                 return false;
+        }
+    }
+
+    // History failures must never break relaying: log the exception type only (no tag, path or payload).
+    private long SafeHead(string tag)
+    {
+        if (history == null) return 0;
+        try { return history.Head(tag); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.WriteLine($"History read failed: {ex.GetType().Name}");
+            return 0;
+        }
+    }
+
+    private void SafeAppend(string tag, long id, string payload)
+    {
+        if (history == null) return;
+        try { history.Append(tag, id, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), payload); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.WriteLine($"History write failed: {ex.GetType().Name}");
         }
     }
 
