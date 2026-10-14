@@ -2,36 +2,39 @@ namespace CipherChatServer;
 
 class Program
 {
-    static void Main(string[] args)
+    static int Main(string[] args)
     {
-        // Default: loopback on port 3000; optionally "host port" from the command line
+        // Default: loopback on port 3000; optionally "host port [dataDir]" from the command line
         string host = "localhost";
         int port = 3000;
         if (args.Length >= 1) host = args[0];
-        if (args.Length >= 2) port = int.Parse(args[1]);
-        // Optional third argument: history directory (opt-in; without it nothing is stored)
-        string historyDir = args.Length >= 3 ? args[2] : null;
+        if (args.Length >= 2 && (!int.TryParse(args[1], out port) || port < 0 || port > 65535))
+        {
+            Console.Error.WriteLine("Usage: CipherChatServer [host] [port 0-65535] [dataDir]");
+            return 1;
+        }
+        // Optional third argument: data directory for accounts.txt (without it accounts are kept in memory only)
+        string dataDir = args.Length >= 3 ? args[2] : null;
 
         ChatServer server;
         try
         {
-            server = new(host, port, new ChatServerOptions { HistoryDirectory = historyDir });
+            server = new(host, port, new ChatServerOptions { DataDirectory = dataDir });
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or FormatException or InvalidDataException)
         {
-            Console.Error.WriteLine($"Cannot use the history directory: {ex.Message}");
-            return;
+            Console.Error.WriteLine($"Cannot start the server: {ex.GetType().Name}. Check the host address and the data directory.");
+            return 1;
         }
 
-        // Step 1: Start the server to listen for incoming client connections
         server.Start();
-        Console.Clear();
-        Console.WriteLine("Server started...");
-        Console.WriteLine(historyDir == null
-            ? "History: off (pass a directory as third argument to keep encrypted history)\n"
-            : $"History: on, up to {ChatServerOptions.DefaultMaxPerChannel} messages per channel in {historyDir}\n");
+        Console.WriteLine("Server started (protocol v4).");
+        Console.WriteLine(dataDir == null
+            ? "WARNING: no data directory given; accounts are kept in memory only and names can be re-claimed after a restart."
+            : "Accounts are stored in the data directory.");
 
-        // Step 2: Keep the process alive while the server accepts and manages clients
+        // Keep the process alive while the server accepts and manages clients
         server.Stopped.Wait();
+        return 0;
     }
 }

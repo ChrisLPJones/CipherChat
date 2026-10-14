@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using CipherChatClient;
 using Xunit;
-using S = CipherChatServer.ServerFrameV4;
+using S = CipherChatServer.ServerFrame;
 using C = CipherChatClient.ClientFrameV4;
 
 namespace CipherChat.Tests;
@@ -20,36 +20,36 @@ public class ProtocolV4FrameTests
     public void ClientFormats_ParseOnServer()
     {
         Assert.True(S.TryParse(C.Hello(), out var c));
-        Assert.Equal(CipherChatServer.ClientVerbV4.Hello, c.Verb);
+        Assert.Equal(CipherChatServer.ClientVerb.Hello, c.Verb);
 
         byte[] pub = R(65), sig = R(64);
         Assert.True(S.TryParse(C.Register("alice", pub, sig), out c));
-        Assert.Equal((CipherChatServer.ClientVerbV4.Register, "alice", Convert.ToBase64String(pub), Convert.ToBase64String(sig)), (c.Verb, c.User, c.Pub, c.Data));
+        Assert.Equal((CipherChatServer.ClientVerb.Register, "alice", Convert.ToBase64String(pub), Convert.ToBase64String(sig)), (c.Verb, c.User, c.Pub, c.Data));
 
         Assert.True(S.TryParse(C.Login("a.b_c-1", sig), out c));
-        Assert.Equal((CipherChatServer.ClientVerbV4.Login, "a.b_c-1", Convert.ToBase64String(sig)), (c.Verb, c.User, c.Data));
+        Assert.Equal((CipherChatServer.ClientVerb.Login, "a.b_c-1", Convert.ToBase64String(sig)), (c.Verb, c.User, c.Data));
 
         Assert.True(S.TryParse(C.Key("bob"), out c));
-        Assert.Equal((CipherChatServer.ClientVerbV4.Key, "bob"), (c.Verb, c.User));
+        Assert.Equal((CipherChatServer.ClientVerb.Key, "bob"), (c.Verb, c.User));
 
         byte[] offer = R(156), accept = R(179), confirm = R(50), knock = R(74);
         Assert.True(S.TryParse(C.Offer("bob", offer), out c));
-        Assert.Equal((CipherChatServer.ClientVerbV4.Offer, "bob", Convert.ToBase64String(offer)), (c.Verb, c.User, c.Data));
+        Assert.Equal((CipherChatServer.ClientVerb.Offer, "bob", Convert.ToBase64String(offer)), (c.Verb, c.User, c.Data));
         Assert.True(S.TryParse(C.Accept("bob", accept), out c));
-        Assert.Equal(CipherChatServer.ClientVerbV4.Accept, c.Verb);
+        Assert.Equal(CipherChatServer.ClientVerb.Accept, c.Verb);
         Assert.True(S.TryParse(C.Confirm("bob", confirm), out c));
-        Assert.Equal(CipherChatServer.ClientVerbV4.Confirm, c.Verb);
+        Assert.Equal(CipherChatServer.ClientVerb.Confirm, c.Verb);
         Assert.True(S.TryParse(C.Knock("bob", knock), out c));
-        Assert.Equal(CipherChatServer.ClientVerbV4.Knock, c.Verb);
+        Assert.Equal(CipherChatServer.ClientVerb.Knock, c.Verb);
         Assert.True(S.TryParse(C.Users(), out c));
-        Assert.Equal(CipherChatServer.ClientVerbV4.Users, c.Verb);
+        Assert.Equal(CipherChatServer.ClientVerb.Users, c.Verb);
         Assert.True(S.TryParse(C.Ping(), out c));
-        Assert.Equal(CipherChatServer.ClientVerbV4.Ping, c.Verb);
+        Assert.Equal(CipherChatServer.ClientVerb.Ping, c.Verb);
 
         for (int k = 1; k <= 24; k++)
         {
             Assert.True(S.TryParse(C.Msg("bob", R(26 + 256 * k + 16)), out c), $"k={k}");
-            Assert.Equal(CipherChatServer.ClientVerbV4.Msg, c.Verb);
+            Assert.Equal(CipherChatServer.ClientVerb.Msg, c.Verb);
         }
     }
 
