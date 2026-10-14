@@ -1,30 +1,35 @@
-using System.Globalization;
-
 namespace CipherChatClient;
 
-public enum ServerEventKind { Welcome, Member, Joined, Left, Msg, Ack, Hist, HistEnd, Pong, Err }
+public enum ServerEventKind { Welcome, Ready, Key, Offer, Accept, Confirm, Msg, Knock, Offline, Gone, Pong, Err, UserList }
 
-// One validated server-to-client line (wire protocol v3).
+// One validated server-to-client line (wire protocol v4).
 public sealed class ServerEvent
 {
     public ServerEventKind Kind { get; init; }
-    public string Tag { get; init; }
-    public int Mid { get; init; }
-    public long Id { get; init; }       // message id (MSG/ACK/HIST) or head id (HISTEND)
-    public string Data { get; init; }   // payload or presence (Base64) or error code
+    public string User { get; init; }          // READY/KEY/OFFLINE/GONE user, relay sender, ERR user
+    public string Data { get; init; }          // challenge, key, blob (Base64) or error code
+    public string[] Users { get; init; }       // USERLIST
 }
 
-// Wire grammar, client side (the server has its own copy in ServerFrame.cs; tests cross-check them).
+// Wire grammar v4, client side (the server has its own copy in ServerFrameV4.cs; tests cross-check them).
+//
 public static class ClientFrame
 {
-    public const int Version = 3;
+    public const int Version = 4;
+    public static readonly string[] ErrorCodes =
+        { "version", "auth", "taken", "nouser", "self", "rate", "full", "limit", "replaced", "timeout", "notauth" };
 
     // Client-to-server lines (without the trailing newline).
     public static string Hello() => $"HELLO {Version}";
-    public static string Join(string tag, string presence) => $"JOIN {tag} {presence}";
-    public static string Leave(string tag) => $"LEAVE {tag}";
-    public static string Msg(string tag, string payload) => $"MSG {tag} {payload}";
-    public static string Hist(string tag, long afterId, int max) => $"HIST {tag} {afterId} {max}";
+    public static string Register(string user, byte[] pub, byte[] sig) => $"REGISTER {user} {Convert.ToBase64String(pub)} {Convert.ToBase64String(sig)}";
+    public static string Login(string user, byte[] sig) => $"LOGIN {user} {Convert.ToBase64String(sig)}";
+    public static string Key(string user) => $"KEY {user}";
+    public static string Offer(string to, byte[] blob) => $"OFFER {to} {Convert.ToBase64String(blob)}";
+    public static string Accept(string to, byte[] blob) => $"ACCEPT {to} {Convert.ToBase64String(blob)}";
+    public static string Confirm(string to, byte[] blob) => $"CONFIRM {to} {Convert.ToBase64String(blob)}";
+    public static string Msg(string to, byte[] blob) => $"MSG {to} {Convert.ToBase64String(blob)}";
+    public static string Knock(string to, byte[] blob) => $"KNOCK {to} {Convert.ToBase64String(blob)}";
+    public static string Users() => "USERS";
     public static string Ping() => "PING";
 
     // Returns false for any line outside the grammar.
@@ -38,89 +43,121 @@ public static class ClientFrame
         switch (t[0])
         {
             case "WELCOME":
-                if (t.Length != 3 || t[1] != "3" || !TryMid(t[2], out int wm)) return false;
-                ev = new ServerEvent { Kind = ServerEventKind.Welcome, Mid = wm };
+                if (t.Length != 3 || t[1] != "4" || !IsBase64Bytes(t[2], 32)) return false;
+                ev = new ServerEvent { Kind = ServerEventKind.Welcome, Data = t[2] };
                 return true;
-            case "MEMBER":
-            case "JOINED":
-                if (t.Length != 4 || !IsTag(t[1]) || !TryMid(t[2], out int mm)) return false;
-                if (!IsBase64(t[3], ProtocolLimits.MinPayloadChars, ProtocolLimits.MaxPresenceChars)) return false;
-                ev = new ServerEvent { Kind = t[0] == "MEMBER" ? ServerEventKind.Member : ServerEventKind.Joined, Tag = t[1], Mid = mm, Data = t[3] };
+            case "READY":
+            case "OFFLINE":
+            case "GONE":
+                if (t.Length != 2 || !IsUser(t[1])) return false;
+                ev = new ServerEvent { Kind = t[0] == "READY" ? ServerEventKind.Ready : t[0] == "OFFLINE" ? ServerEventKind.Offline : ServerEventKind.Gone, User = t[1] };
                 return true;
-            case "LEFT":
-                if (t.Length != 3 || !IsTag(t[1]) || !TryMid(t[2], out int lm)) return false;
-                ev = new ServerEvent { Kind = ServerEventKind.Left, Tag = t[1], Mid = lm };
+            case "KEY":
+                if (t.Length != 3 || !IsUser(t[1]) || !IsBase64Bytes(t[2], 65)) return false;
+                ev = new ServerEvent { Kind = ServerEventKind.Key, User = t[1], Data = t[2] };
                 return true;
+            case "OFFER": return Relay(t, ServerEventKind.Offer, 156, out ev);
+            case "ACCEPT": return Relay(t, ServerEventKind.Accept, 179, out ev);
+            case "CONFIRM": return Relay(t, ServerEventKind.Confirm, 50, out ev);
+            case "KNOCK": return Relay(t, ServerEventKind.Knock, 74, out ev);
             case "MSG":
-            case "HIST":
-                if (t.Length != 4 || !IsTag(t[1]) || !TryNumber(t[2], out long id)) return false;
-                if (!IsBase64(t[3], ProtocolLimits.MinPayloadChars, ProtocolLimits.MaxPayloadChars)) return false;
-                ev = new ServerEvent { Kind = t[0] == "MSG" ? ServerEventKind.Msg : ServerEventKind.Hist, Tag = t[1], Id = id, Data = t[3] };
-                return true;
-            case "ACK":
-            case "HISTEND":
-                if (t.Length != 3 || !IsTag(t[1]) || !TryNumber(t[2], out long n)) return false;
-                ev = new ServerEvent { Kind = t[0] == "ACK" ? ServerEventKind.Ack : ServerEventKind.HistEnd, Tag = t[1], Id = n };
+                if (t.Length != 3 || !IsUser(t[1]) || !IsMsgBlob(t[2])) return false;
+                ev = new ServerEvent { Kind = ServerEventKind.Msg, User = t[1], Data = t[2] };
                 return true;
             case "PONG":
                 if (t.Length != 1) return false;
                 ev = new ServerEvent { Kind = ServerEventKind.Pong };
                 return true;
             case "ERR":
-                if (t.Length != 2 || !IsErrCode(t[1])) return false;
-                ev = new ServerEvent { Kind = ServerEventKind.Err, Data = t[1] };
+                if ((t.Length != 2 && t.Length != 3) || Array.IndexOf(ErrorCodes, t[1]) < 0) return false;
+                if (t.Length == 3 && !IsUser(t[2])) return false;
+                ev = new ServerEvent { Kind = ServerEventKind.Err, Data = t[1], User = t.Length == 3 ? t[2] : null };
                 return true;
+            case "USERLIST":
+                return ParseUserList(t, out ev);
             default:
                 return false;
         }
     }
 
-    public static bool IsTag(string s)
+    private static bool ParseUserList(string[] t, out ServerEvent ev)
     {
-        if (s == null || s.Length != ProtocolLimits.TagChars) return false;
-        foreach (char c in s)
+        ev = null;
+        if (t.Length < 2) return false;
+        string c = t[1];
+        if (c.Length < 1 || c.Length > 3 || (c.Length > 1 && c[0] == '0')) return false;
+        foreach (char ch in c) if (ch < '0' || ch > '9') return false;
+        int n = int.Parse(c, System.Globalization.CultureInfo.InvariantCulture);
+        if (n > ProtocolLimits.MaxUserListEntries || t.Length != 2 + n) return false;
+        string[] names = new string[n];
+        HashSet<string> seen = new();
+        for (int i = 0; i < n; i++)
         {
-            bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
-            if (!ok) return false;
+            if (!IsUser(t[2 + i]) || !seen.Add(t[2 + i])) return false;
+            names[i] = t[2 + i];
         }
+        ev = new ServerEvent { Kind = ServerEventKind.UserList, Users = names };
         return true;
     }
 
-    public static bool IsBase64(string s, int min, int max)
+    private static bool Relay(string[] t, ServerEventKind kind, int bytes, out ServerEvent ev)
     {
-        if (s == null || s.Length < min || s.Length > max) return false;
-        int end = s.Length;
-        while (end > 0 && s[end - 1] == '=') end--;
-        if (s.Length - end > 2) return false;
+        ev = null;
+        if (t.Length != 3 || !IsUser(t[1]) || !IsBase64Bytes(t[2], bytes)) return false;
+        ev = new ServerEvent { Kind = kind, User = t[1], Data = t[2] };
+        return true;
+    }
+
+    public static bool IsUser(string s) => Proto.IsUserName(s);
+
+    public static bool IsBase64Bytes(string s, int bytes) => TryBase64ByteLength(s, out int n) && n == bytes;
+
+    public static bool IsMsgBlob(string s)
+    {
+        if (s == null || s.Length < ProtocolLimits.MinMsgChars || s.Length > ProtocolLimits.MaxMsgChars) return false;
+        if (!TryBase64ByteLength(s, out int n)) return false;
+        int body = n - 26 - 16;
+        return body >= ProtocolLimits.PadBlock && body % ProtocolLimits.PadBlock == 0 && body / ProtocolLimits.PadBlock <= 24;
+    }
+
+    // Charset, length multiple of 4, padding only at the end and with zero unused bits (canonical).
+    public static bool TryBase64ByteLength(string s, out int bytes)
+    {
+        bytes = 0;
+        if (s == null || s.Length == 0 || s.Length % 4 != 0) return false;
+        int pad = 0;
+        if (s[^1] == '=') pad = s.Length >= 2 && s[^2] == '=' ? 2 : 1;
+        int end = s.Length - pad;
         for (int i = 0; i < end; i++)
         {
-            char c = s[i];
-            bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/';
-            if (!ok) return false;
+            int v = Value(s[i]);
+            if (v < 0) return false;
+            if (i == end - 1 && pad == 1 && (v & 0x03) != 0) return false;
+            if (i == end - 1 && pad == 2 && (v & 0x0F) != 0) return false;
         }
+        bytes = s.Length / 4 * 3 - pad;
         return true;
     }
 
-    private static bool TryNumber(string s, out long value)
+    private static int Value(char c)
     {
-        value = 0;
-        if (s.Length < 1 || s.Length > 18) return false;
-        foreach (char c in s) if (c < '0' || c > '9') return false;
-        return long.TryParse(s, NumberStyles.None, CultureInfo.InvariantCulture, out value);
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
     }
 
-    private static bool TryMid(string s, out int mid)
+    // Strict decode: returns null unless the text is canonical Base64 (re-encoding gives the same text).
+    public static byte[] DecodeBlob(string b64)
     {
-        mid = 0;
-        if (s.Length < 1 || s.Length > 9) return false;
-        foreach (char c in s) if (c < '0' || c > '9') return false;
-        return int.TryParse(s, NumberStyles.None, CultureInfo.InvariantCulture, out mid);
-    }
-
-    private static bool IsErrCode(string s)
-    {
-        if (s.Length < 1 || s.Length > 32) return false;
-        foreach (char c in s) if (c < 'a' || c > 'z') return false;
-        return true;
+        if (!TryBase64ByteLength(b64, out _)) return null;
+        try
+        {
+            byte[] b = Convert.FromBase64String(b64);
+            return Convert.ToBase64String(b) == b64 ? b : null;
+        }
+        catch (FormatException) { return null; }
     }
 }

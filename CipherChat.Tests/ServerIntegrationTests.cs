@@ -171,7 +171,7 @@ public class ServerIntegrationTests : IDisposable
         var (c, _) = Hello(s.Port);
         using (c)
         {
-            c.SendLine("MSG bob " + new string('A', CipherChatServer.ProtocolLimits.MaxLineCharsV4 + 10));
+            c.SendLine("MSG bob " + new string('A', CipherChatServer.ProtocolLimits.MaxLineChars + 10));
             Assert.Null(c.ReadLine());
         }
     }
@@ -751,7 +751,7 @@ public class ServerIntegrationTests : IDisposable
             first.C.SendLine("USERS");
             string line = first.C.ReadLine();
             Assert.StartsWith("USERLIST 100 u001 u002", line);
-            Assert.True(ClientFrameV4.TryParse(line, out var ev));
+            Assert.True(ClientFrame.TryParse(line, out var ev));
             Assert.Equal(100, ev.Users.Length);
         }
         finally { foreach (var p in peers) p.Dispose(); }

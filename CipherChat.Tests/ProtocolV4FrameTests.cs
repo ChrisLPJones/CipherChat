@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using CipherChatClient;
 using Xunit;
 using S = CipherChatServer.ServerFrame;
-using C = CipherChatClient.ClientFrameV4;
+using C = CipherChatClient.ClientFrame;
 
 namespace CipherChat.Tests;
 
@@ -60,15 +60,15 @@ public class ProtocolV4FrameTests
     {
         string challenge = B(32);
         Assert.True(C.TryParse(S.Welcome(challenge), out var e));
-        Assert.Equal((ServerEventKindV4.Welcome, challenge), (e.Kind, e.Data));
+        Assert.Equal((ServerEventKind.Welcome, challenge), (e.Kind, e.Data));
 
         Assert.True(C.TryParse(S.Ready("alice"), out e));
-        Assert.Equal((ServerEventKindV4.Ready, "alice"), (e.Kind, e.User));
+        Assert.Equal((ServerEventKind.Ready, "alice"), (e.Kind, e.User));
 
         Assert.True(C.TryParse(S.Key("bob", Pub), out e));
-        Assert.Equal((ServerEventKindV4.Key, "bob", Pub), (e.Kind, e.User, e.Data));
+        Assert.Equal((ServerEventKind.Key, "bob", Pub), (e.Kind, e.User, e.Data));
 
-        foreach (var (verb, bytes, kind) in new[] { ("OFFER", 156, ServerEventKindV4.Offer), ("ACCEPT", 179, ServerEventKindV4.Accept), ("CONFIRM", 50, ServerEventKindV4.Confirm), ("KNOCK", 74, ServerEventKindV4.Knock) })
+        foreach (var (verb, bytes, kind) in new[] { ("OFFER", 156, ServerEventKind.Offer), ("ACCEPT", 179, ServerEventKind.Accept), ("CONFIRM", 50, ServerEventKind.Confirm), ("KNOCK", 74, ServerEventKind.Knock) })
         {
             string blob = B(bytes);
             Assert.True(C.TryParse(S.Relay(verb, "carol", blob), out e), verb);
@@ -76,19 +76,19 @@ public class ProtocolV4FrameTests
         }
         string m = MsgBlob(3);
         Assert.True(C.TryParse(S.Relay("MSG", "carol", m), out e));
-        Assert.Equal((ServerEventKindV4.Msg, "carol", m), (e.Kind, e.User, e.Data));
+        Assert.Equal((ServerEventKind.Msg, "carol", m), (e.Kind, e.User, e.Data));
 
         Assert.True(C.TryParse(S.Offline("dave"), out e));
-        Assert.Equal((ServerEventKindV4.Offline, "dave"), (e.Kind, e.User));
+        Assert.Equal((ServerEventKind.Offline, "dave"), (e.Kind, e.User));
         Assert.True(C.TryParse(S.Gone("dave"), out e));
-        Assert.Equal(ServerEventKindV4.Gone, e.Kind);
+        Assert.Equal(ServerEventKind.Gone, e.Kind);
         Assert.True(C.TryParse(S.Pong, out e));
-        Assert.Equal(ServerEventKindV4.Pong, e.Kind);
+        Assert.Equal(ServerEventKind.Pong, e.Kind);
 
         foreach (string code in S.ErrorCodes)
         {
             Assert.True(C.TryParse(S.Err(code), out e), code);
-            Assert.Equal((ServerEventKindV4.Err, code, (string)null), (e.Kind, e.Data, e.User));
+            Assert.Equal((ServerEventKind.Err, code, (string)null), (e.Kind, e.Data, e.User));
             Assert.True(C.TryParse(S.Err(code, "bob"), out e), code);
             Assert.Equal("bob", e.User);
         }
@@ -106,7 +106,7 @@ public class ProtocolV4FrameTests
 
         string[] hundred = Enumerable.Range(0, 100).Select(i => "user" + i).ToArray();
         string line = S.UserList(hundred);
-        Assert.True(line.Length <= ProtocolLimits.MaxLineCharsV4);
+        Assert.True(line.Length <= ProtocolLimits.MaxLineChars);
         Assert.True(C.TryParse(line, out e));
         Assert.Equal(100, e.Users.Length);
         string[] many = Enumerable.Range(0, 101).Select(i => "user" + i).ToArray();
@@ -239,11 +239,11 @@ public class ProtocolV4FrameTests
         Assert.Equal(ProtocolLimits.MaxMsgChars, max.Length);
         string line = C.Msg("a" + new string('b', 19), R(26 + 256 * 24 + 16));
         Assert.Equal("MSG ".Length + 20 + 1 + 8248, line.Length);
-        Assert.True(line.Length <= ProtocolLimits.MaxLineCharsV4);
+        Assert.True(line.Length <= ProtocolLimits.MaxLineChars);
         Assert.True(S.TryParse(line, out _));
         Assert.True(C.TryParse(S.Relay("MSG", new string('b', 20), max), out _));
-        Assert.False(S.TryParse(new string('A', ProtocolLimits.MaxLineCharsV4 + 1), out _));
-        Assert.False(C.TryParse(new string('A', ProtocolLimits.MaxLineCharsV4 + 1), out _));
+        Assert.False(S.TryParse(new string('A', ProtocolLimits.MaxLineChars + 1), out _));
+        Assert.False(C.TryParse(new string('A', ProtocolLimits.MaxLineChars + 1), out _));
         Assert.False(S.TryParse("MSG bob " + new string('A', ProtocolLimits.MaxMsgChars + 4), out _));
         Assert.False(S.TryParse(null, out _));
         Assert.False(C.TryParse(null, out _));

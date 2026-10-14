@@ -6,8 +6,6 @@ namespace CipherChat.Tests;
 
 public class MessageRulesTests
 {
-    private const string Tag = "AAAAAAAAAAAAAAAAAAAAAA";
-
     [Theory]
     [InlineData("alice", true)]
     [InlineData("A_b.c-9", true)]
@@ -21,22 +19,6 @@ public class MessageRulesTests
     public void ValidateUsername(string name, bool valid)
     {
         Assert.Equal(valid, MessageRules.ValidateUsername(name) == null);
-    }
-
-    [Theory]
-    [InlineData("lounge", true)]
-    [InlineData("Dev_Team.1-x", true)]
-    [InlineData("", false)]
-    [InlineData("a b", false)]
-    [InlineData("dm:bob", false)]
-    [InlineData("a|b", false)]
-    [InlineData("café", false)]
-    [InlineData("a\u001bb", false)]
-    [InlineData("12345678901234567890123456789012", true)]   // 32 chars
-    [InlineData("123456789012345678901234567890123", false)] // 33 chars
-    public void ValidateRoomName(string name, bool valid)
-    {
-        Assert.Equal(valid, MessageRules.ValidateRoomName(name) == null);
     }
 
     [Fact]
@@ -60,16 +42,6 @@ public class MessageRulesTests
     public void Sanitizer_StripsFormatAndSeparatorChars(string input)
     {
         Assert.Equal("ab", MessageRules.SanitizeForDisplay(input));
-    }
-
-    [Fact]
-    public void TryDecrypt_ClassifiesResults()
-    {
-        string cipher = AESecureString.EncryptString("hi", "k1", Tag);
-        Assert.Equal(DecryptStatus.Ok, MessageRules.TryDecrypt(cipher, "k1", Tag, out string plain));
-        Assert.Equal("hi", plain);
-        Assert.Equal(DecryptStatus.WrongKey, MessageRules.TryDecrypt(cipher, "k2", Tag, out _));
-        Assert.Equal(DecryptStatus.Malformed, MessageRules.TryDecrypt("???", "k1", Tag, out _));
     }
 
     [Fact]

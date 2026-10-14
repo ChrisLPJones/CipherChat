@@ -13,7 +13,7 @@ public sealed class ClientCommand
 
 // Wire grammar v4, server side. Single-space separated ASCII tokens, closed grammar. The server never decodes
 // Base64: it checks charset, canonical padding, exact lengths (or the padded-block structure for MSG) only.
-// The client has its own copy (ClientFrameV4.cs); tests cross-check them. Wire protocol v4.
+// The client has its own copy (ClientFrame.cs); tests cross-check them. Wire protocol v4.
 public static class ServerFrame
 {
     public const int Version = 4;
@@ -24,7 +24,7 @@ public static class ServerFrame
     public static bool TryParse(string line, out ClientCommand cmd)
     {
         cmd = null;
-        if (line == null || line.Length == 0 || line.Length > ProtocolLimits.MaxLineCharsV4) return false;
+        if (line == null || line.Length == 0 || line.Length > ProtocolLimits.MaxLineChars) return false;
         string[] t = line.Split(' ');
         foreach (string token in t) if (token.Length == 0) return false;
 

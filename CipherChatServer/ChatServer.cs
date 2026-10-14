@@ -134,7 +134,7 @@ public class ChatServer : IDisposable
             StreamReader reader = new(conn.Stream, Encoding.ASCII);
 
             // The first line must be exactly "HELLO 4"; anything else (a v3 client, junk) gets ERR version.
-            string first = ProtocolLimits.ReadBoundedLine(reader, ProtocolLimits.MaxLineCharsV4);
+            string first = ProtocolLimits.ReadBoundedLine(reader, ProtocolLimits.MaxLineChars);
             if (first == null) return;
             if (!ServerFrame.TryParse(first, out ClientCommand hello) || hello.Verb != ClientVerb.Hello)
             {
@@ -146,7 +146,7 @@ public class ChatServer : IDisposable
 
             while (true)
             {
-                string line = ProtocolLimits.ReadBoundedLine(reader, ProtocolLimits.MaxLineCharsV4);
+                string line = ProtocolLimits.ReadBoundedLine(reader, ProtocolLimits.MaxLineChars);
                 if (line == null) break;
 
                 // Any line outside the grammar drops this client only
