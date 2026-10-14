@@ -42,12 +42,12 @@ public static class MessageRules
     }
 
     // Decrypts one received line and classifies the outcome.
-    public static DecryptStatus TryDecrypt(string line, string key, out string plainText)
+    public static DecryptStatus TryDecrypt(string line, string key, string channelTag, out string plainText)
     {
         plainText = null;
         try
         {
-            plainText = AESecureString.DecryptCipher(line, key);
+            plainText = AESecureString.DecryptCipher(line, key, channelTag);
             return DecryptStatus.Ok;
         }
         catch (CipherAuthenticationException)
