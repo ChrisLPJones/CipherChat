@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -25,14 +26,17 @@ public static class MessageRules
         return null;
     }
 
-    // Removes control characters (including ESC) so decrypted text cannot inject terminal escapes.
+    // Removes control, format (bidi overrides, zero-width), line and paragraph separator characters (including ESC) so decrypted text cannot inject terminal escapes.
     public static string SanitizeForDisplay(string text)
     {
         if (text == null) return "";
         StringBuilder sb = new(text.Length);
         foreach (char c in text)
         {
-            if (!char.IsControl(c)) sb.Append(c);
+            if (char.IsControl(c)) continue;
+            UnicodeCategory cat = char.GetUnicodeCategory(c);
+            if (cat == UnicodeCategory.Format || cat == UnicodeCategory.LineSeparator || cat == UnicodeCategory.ParagraphSeparator) continue;
+            sb.Append(c);
         }
         return sb.ToString();
     }

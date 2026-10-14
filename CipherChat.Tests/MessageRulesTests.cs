@@ -29,6 +29,21 @@ public class MessageRulesTests
         Assert.Equal("Ünï 日本語 🚀", MessageRules.SanitizeForDisplay("Ünï 日本語 🚀"));
     }
 
+    [Theory]
+    [InlineData("a\u202Eb")]
+    [InlineData("a\u202Ab")]
+    [InlineData("a\u2066b")]
+    [InlineData("a\u2069b")]
+    [InlineData("a\u2028b")]
+    [InlineData("a\u2029b")]
+    [InlineData("a\u200Bb")]
+    [InlineData("a\u200Db")]
+    [InlineData("a\uFEFFb")]
+    public void Sanitizer_StripsFormatAndSeparatorChars(string input)
+    {
+        Assert.Equal("ab", MessageRules.SanitizeForDisplay(input));
+    }
+
     [Fact]
     public void TryDecrypt_ClassifiesResults()
     {

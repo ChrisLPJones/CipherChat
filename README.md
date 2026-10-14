@@ -81,7 +81,7 @@ Below are the detailed steps emphasizing the encryption process:
 2. **Key Derivation**:
    - CipherChat derives a 256-bit AES key from the passphrase (shared encryption key) and a randomly generated salt.
    - This derivation is performed using PBKDF2 (Password-Based Key Derivation Function 2) with 600,000 iterations and SHA256 as the hash algorithm.
-   - The derived key ensures that even if the passphrase is weak, the encryption remains secure due to the computational complexity of the key derivation process.
+   - The 600,000 iterations make guessing the passphrase slower, but a weak passphrase is still weak: use a long random one.
 
 3. **Connecting to the Server**:
    - When a user connects, they must enter their username and the shared encryption key.
@@ -110,7 +110,7 @@ By adhering to this process, CipherChat ensures that all communication remains s
 Messages are now AES-256-GCM, Base64 of `version(0x02) | salt(16) | nonce(12) | ciphertext | tag(16)`, one per
 newline-delimited line. Old (AES-CBC) and new clients cannot read each other: upgrade all clients together.
 Limits (`ProtocolLimits`): usernames 1-20 characters of `A-Za-z0-9_.-`, messages up to 2000 characters, lines up to
-11000 characters. The server drops and disconnects clients that send over-length or non-Base64 lines.
+11000 characters. The username rules are enforced by the client only; the server cannot see usernames (see Trust model). The server drops and disconnects clients that send over-length or non-Base64 lines.
 
 ## Trust model
 
