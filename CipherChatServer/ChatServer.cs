@@ -103,8 +103,10 @@ public class ChatServer : IDisposable
             StreamReader reader = new(stream);
 
             // Step 1: Read the encrypted username (one newline-delimited line) from the connected client
-            string userNameLine = reader.ReadLine();
-            encryptedUserName = userNameLine?.Trim() ?? "";
+            string userNameLine = ProtocolLimits.ReadBoundedLine(reader, ProtocolLimits.MaxLineChars);
+            if (userNameLine == null) return;
+            encryptedUserName = userNameLine.Trim();
+            if (!IsValidLine(encryptedUserName)) return; // drop and close
 
             // Step 2: Add the client's encrypted username to the connected users list
             lock (clientsConnected)
@@ -124,10 +126,14 @@ public class ChatServer : IDisposable
                 try
                 {
                     // Read one newline-delimited message at a time
-                    string line = reader.ReadLine();
+                    string line = ProtocolLimits.ReadBoundedLine(reader, ProtocolLimits.MaxLineChars);
 
                     // Exit the loop if the client disconnects (no data received)
                     if (line == null) break;
+
+                    // Drop and disconnect clients sending anything that is not a plausible Base64 line
+                    line = line.Trim();
+                    if (!IsValidLine(line)) break;
 
                     // Broadcast the received message to all other clients
                     BroadcastMessage(client, line);
@@ -138,6 +144,10 @@ public class ChatServer : IDisposable
                     break;
                 }
             }
+        }
+        catch (InvalidDataException)
+        {
+            // Over-length line: close this client only
         }
         catch (Exception ex)
         {
@@ -156,6 +166,19 @@ public class ChatServer : IDisposable
             }
             client.Close();
         }
+    }
+
+    // A relayable line is Base64 only, within the protocol length bounds (also prevents log injection)
+    private static bool IsValidLine(string line)
+    {
+        if (line.Length < ProtocolLimits.MinLineChars || line.Length > ProtocolLimits.MaxLineChars) return false;
+        foreach (char c in line)
+        {
+            bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                      || c == '+' || c == '/' || c == '=';
+            if (!ok) return false;
+        }
+        return true;
     }
 
     // Sends the list of all currently connected users to a newly connected client

@@ -40,6 +40,11 @@ class Program
         while (client.Connected)
         {
             string input = GetUserInput();
+            if (input.Length > ProtocolLimits.MaxMessageChars)
+            {
+                AddSystemMessage($"Message too long (max {ProtocolLimits.MaxMessageChars} characters).");
+                continue;
+            }
             SendMessage($"{userName}: {input}");
         }
     }
@@ -49,19 +54,24 @@ class Program
         
         Console.Clear();
         
-        // Check if empty username
-        while(string.IsNullOrWhiteSpace(userName)){
+        // Validate the username against the protocol rules, re-prompting with the reason
+        string problem = null;
+        while (true)
+        {
             Console.Write("Enter username: ");
-            userName = Console.ReadLine();
+            string candidate = Console.ReadLine() ?? "";
             Console.Clear();
-            if(userName.Length > 0){
+            problem = MessageRules.ValidateUsername(candidate);
+            if (problem == null)
+            {
+                userName = candidate;
                 break;
             }
             Console.SetCursorPosition(0, 1);
-            Console.WriteLine("A username is required to proceed.");
+            Console.WriteLine(problem);
             Console.SetCursorPosition(0, 0);
         }
-        
+
         // Check if empty Encryption key
         while(string.IsNullOrWhiteSpace(encryptionKey)){
             Console.Write("Enter encryption key: ");
@@ -125,41 +135,54 @@ class Program
     private static async Task ReceiveMessages()
     {
         StreamReader reader = new(stream);
+        int wrongKeyCount = 0;
 
         while (client.Connected)
         {
             try
             {
-                // Read one newline-delimited message at a time
-                string line = await reader.ReadLineAsync();
+                // Read one newline-delimited message at a time (bounded length)
+                string line = await ProtocolLimits.ReadBoundedLineAsync(reader, ProtocolLimits.MaxLineChars);
 
                 // Exit the loop if the server closes the connection
                 if (line == null) break;
 
-                try
+                switch (MessageRules.TryDecrypt(line.Trim(), encryptionKey, out string plainText))
                 {
-                    string plainText = AESecureString.DecryptCipher(line.Trim(), encryptionKey);
-
-                    lock (messages)
-                    {
-                        if (plainText != string.Empty)
-                        {
-                            messages.Add(plainText);
-                            DisplayMessages();
-                            DisplayInputLine();
-                        }
-                    }
+                    case DecryptStatus.Ok:
+                        AddSystemMessage(MessageRules.SanitizeForDisplay(plainText));
+                        break;
+                    case DecryptStatus.WrongKey:
+                        // Show on the first failure and then every 10th; never disconnect
+                        if (wrongKeyCount++ % 10 == 0)
+                            AddSystemMessage("Could not decrypt a message: the shared key is probably wrong (or the sender uses an older version).");
+                        break;
+                    default:
+                        AddSystemMessage("Malformed message ignored.");
+                        break;
                 }
-                catch (FormatException)
-                {
-                    Console.WriteLine("Received invalid Base64 message, skipping...");
-                }
+            }
+            catch (InvalidDataException)
+            {
+                AddSystemMessage("Received an over-length line from the server; stopping.");
+                break;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error receiving message: {ex.Message}");
                 break;
             }
+        }
+    }
+
+    // Adds a line to the message list and redraws, so it is not wiped by the next redraw
+    private static void AddSystemMessage(string text)
+    {
+        lock (messages)
+        {
+            messages.Add(text);
+            DisplayMessages();
+            DisplayInputLine();
         }
     }
 
@@ -269,7 +292,7 @@ class Program
                     break;
 
                 default:
-                    if (!char.IsControl(keyInfo.KeyChar))
+                    if (!char.IsControl(keyInfo.KeyChar) && currentInput.Length < ProtocolLimits.MaxMessageChars)
                     {
                         currentInput = currentInput.Insert(currentCursorPosition, keyInfo.KeyChar.ToString());
                         currentCursorPosition++;

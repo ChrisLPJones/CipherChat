@@ -85,6 +85,58 @@ public class ChatServerIntegrationTests : IDisposable
         }
     }
 
+    [Fact]
+    public void Server_ClosesClientSendingOverLengthLine_OthersUnaffected()
+    {
+        server = new ChatServer("localhost", 0);
+        server.Start();
+        int port = server.Port;
+
+        using var good = new TestClient(port);
+        good.SendLine(AESecureString.EncryptString("good is Connected", Key));
+        good.ReadLine();
+
+        using var bad = new TestClient(port);
+        bad.SendLine(new string('A', CipherChatServer.ProtocolLimits.MaxLineChars + 500));
+        Assert.Null(ReadOrNull(bad));
+
+        string msg = AESecureString.EncryptString("still works", Key);
+        using var other = new TestClient(port);
+        other.SendLine(AESecureString.EncryptString("other is Connected", Key));
+        other.ReadLine(); other.ReadLine();
+        good.ReadLine(); // other's connect notice
+        other.SendLine(msg);
+        Assert.Equal(msg, good.ReadLine());
+    }
+
+    [Fact]
+    public void Server_DoesNotRelayNonBase64Line()
+    {
+        server = new ChatServer("localhost", 0);
+        server.Start();
+        int port = server.Port;
+
+        using var a = new TestClient(port);
+        a.SendLine(AESecureString.EncryptString("a is Connected", Key));
+        a.ReadLine();
+        using var b = new TestClient(port);
+        b.SendLine(AESecureString.EncryptString("b is Connected", Key));
+        b.ReadLine(); b.ReadLine();
+        a.ReadLine(); // b's connect notice
+
+        // Injection attempt: ESC and non-Base64 characters, padded past the minimum length
+        b.SendLine("\u001b[2J fake log line " + new string('x', 80));
+        Assert.Null(ReadOrNull(b)); // b is disconnected
+        a.SetTimeout(500);
+        Assert.Null(ReadOrNull(a)); // nothing relayed to a
+    }
+
+    private static string ReadOrNull(TestClient c)
+    {
+        try { return c.ReadLine(); }
+        catch (IOException) { return null; }
+    }
+
     // Minimal raw-socket client speaking the newline-delimited Base64 protocol
     private sealed class TestClient : IDisposable
     {
@@ -106,6 +158,8 @@ public class ChatServerIntegrationTests : IDisposable
             stream.Write(buffer, 0, buffer.Length);
             stream.Flush();
         }
+
+        public void SetTimeout(int ms) => tcp.ReceiveTimeout = ms;
 
         public string ReadLine() => reader.ReadLine();
 
