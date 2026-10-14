@@ -19,9 +19,19 @@ class Program
     private static string userName;
     private static int currentCursorPosition = 0;
     private static string encryptionKey;
+    private static string serverHost = ConnectionArgs.DefaultHost;
+    private static int serverPort = ConnectionArgs.DefaultPort;
 
-    static async Task Main()
+    static async Task<int> Main(string[] args)
     {
+        // Validate "host port" arguments before any prompt
+        if (!ConnectionArgs.TryParse(args, out serverHost, out serverPort, out string argError))
+        {
+            Console.Error.WriteLine(argError);
+            Console.Error.WriteLine(ConnectionArgs.Usage);
+            return 1;
+        }
+
         // Handle cleanup on application exit
         Console.CancelKeyPress += HandleExit;
         AppDomain.CurrentDomain.ProcessExit += (sender, e) => OnProcessExit();
@@ -47,6 +57,7 @@ class Program
             }
             SendMessage($"{userName}: {input}");
         }
+        return 0;
     }
 
     // Prompt the user for their username and encryption key
@@ -116,18 +127,18 @@ class Program
     {
         try
         {
-            await client.ConnectAsync(IPAddress.Loopback, 3000);
+            await client.ConnectAsync(serverHost, serverPort);
             stream = client.GetStream();
 
             string cipherText = AESecureString.EncryptString($"{userName} is Connected", encryptionKey);
             byte[] userConnectedCipherBytes = Encoding.ASCII.GetBytes(cipherText + "\n");
             await stream.WriteAsync(userConnectedCipherBytes);
 
-            Console.WriteLine("Connected to the server...");
+            Console.WriteLine($"Connected to the server at {serverHost}:{serverPort}...");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to connect to server: {ex.Message}");
+            Console.WriteLine($"Failed to connect to {serverHost}:{serverPort}: {ex.Message}");
         }
     }
 
