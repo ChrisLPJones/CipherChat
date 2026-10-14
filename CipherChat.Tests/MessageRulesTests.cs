@@ -6,6 +6,8 @@ namespace CipherChat.Tests;
 
 public class MessageRulesTests
 {
+    private const string Tag = "AAAAAAAAAAAAAAAAAAAAAA";
+
     [Theory]
     [InlineData("alice", true)]
     [InlineData("A_b.c-9", true)]
@@ -47,11 +49,11 @@ public class MessageRulesTests
     [Fact]
     public void TryDecrypt_ClassifiesResults()
     {
-        string cipher = AESecureString.EncryptString("hi", "k1");
-        Assert.Equal(DecryptStatus.Ok, MessageRules.TryDecrypt(cipher, "k1", out string plain));
+        string cipher = AESecureString.EncryptString("hi", "k1", Tag);
+        Assert.Equal(DecryptStatus.Ok, MessageRules.TryDecrypt(cipher, "k1", Tag, out string plain));
         Assert.Equal("hi", plain);
-        Assert.Equal(DecryptStatus.WrongKey, MessageRules.TryDecrypt(cipher, "k2", out _));
-        Assert.Equal(DecryptStatus.Malformed, MessageRules.TryDecrypt("???", "k1", out _));
+        Assert.Equal(DecryptStatus.WrongKey, MessageRules.TryDecrypt(cipher, "k2", Tag, out _));
+        Assert.Equal(DecryptStatus.Malformed, MessageRules.TryDecrypt("???", "k1", Tag, out _));
     }
 
     [Fact]

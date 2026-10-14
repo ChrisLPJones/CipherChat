@@ -4,17 +4,20 @@ using System.Text;
 
 namespace CipherChatServer;
 
-// TCP chat server: accepts newline-delimited Base64 lines, tracks the
-// encrypted usernames of connected clients and broadcasts messages to all
-// other connected clients. Behavior is identical to the original Program.cs
-// logic; it is extracted here so it can be started on an ephemeral port in tests.
+// TCP chat server speaking wire protocol v3 (see README "Protocol v3").
+// The server routes by opaque channel tag only. It never decrypts anything: payloads and
+// presence blobs are validated for charset and length and relayed byte-identical.
+// It logs no payloads, presence blobs, tags or IP addresses.
 public class ChatServer : IDisposable
 {
-    // List to store all connected clients for broadcasting messages
-    private readonly List<TcpClient> clients = [];
+    private const int WriteTimeoutMs = 5000;
 
-    // List to store encrypted usernames of connected clients
-    private readonly List<string> clientsConnected = [];
+    // One lock guards the registry (clients, channels, per-connection joined sets) and
+    // serialises sends so per-channel ordering matches id order.
+    private readonly object sync = new();
+    private readonly List<Connection> clients = [];
+    private readonly Dictionary<string, Channel> channels = [];
+    private int nextMid;
 
     private readonly TcpListener listener;
     private readonly TaskCompletionSource<bool> stopped = new();
@@ -41,19 +44,16 @@ public class ChatServer : IDisposable
         acceptTask = Task.Run(AcceptLoop);
     }
 
-    // Stops accepting connections, closes all clients and waits for handlers to finish
+    // Stops accepting connections, closes all clients and waits for the accept loop to finish
     public void Stop()
     {
         if (Interlocked.Exchange(ref stopRequested, 1) == 1) return;
 
         listener.Stop();
 
-        lock (clients)
+        lock (sync)
         {
-            foreach (var client in clients)
-            {
-                client.Close();
-            }
+            foreach (var client in clients) client.Close();
         }
 
         acceptTask?.Wait();
@@ -65,15 +65,14 @@ public class ChatServer : IDisposable
         Stop();
     }
 
-    // Accepts new client connections in a loop and assigns each to a handler
     private void AcceptLoop()
     {
         while (true)
         {
-            TcpClient client;
+            TcpClient tcp;
             try
             {
-                client = listener.AcceptTcpClient();
+                tcp = listener.AcceptTcpClient();
             }
             catch (Exception)
             {
@@ -81,154 +80,194 @@ public class ChatServer : IDisposable
                 break;
             }
 
-            // Safely add the client to the list of connected clients
-            lock (clients)
+            Connection conn = new(tcp, Interlocked.Increment(ref nextMid));
+            lock (sync)
             {
-                clients.Add(client);
+                clients.Add(conn);
             }
-
-            // Handle the connected client in a separate asynchronous task
-            _ = Task.Run(() => HandleClient(client));
+            _ = Task.Run(() => HandleClient(conn));
         }
     }
 
     // Manages communication with a single connected client
-    private void HandleClient(TcpClient client)
+    private void HandleClient(Connection conn)
     {
-        string encryptedUserName = "";
-
         try
         {
-            NetworkStream stream = client.GetStream();
-            StreamReader reader = new(stream);
+            StreamReader reader = new(conn.Stream, Encoding.ASCII);
 
-            // Step 1: Read the encrypted username (one newline-delimited line) from the connected client
-            string userNameLine = ProtocolLimits.ReadBoundedLine(reader, ProtocolLimits.MaxLineChars);
-            if (userNameLine == null) return;
-            encryptedUserName = userNameLine.Trim();
-            if (!IsValidLine(encryptedUserName)) return; // drop and close
-
-            // Step 2: Add the client's encrypted username to the connected users list
-            lock (clientsConnected)
+            // Handshake: the first line must be exactly "HELLO 3". Anything else (including a
+            // bare Base64 line from a v2 client) gets ERR version and the connection is closed.
+            string first = ProtocolLimits.ReadBoundedLine(reader, ProtocolLimits.MaxLineChars);
+            if (first == null) return;
+            if (!ServerFrame.TryParse(first, out ClientCommand hello) || hello.Verb != ClientVerb.Hello)
             {
-                clientsConnected.Add(encryptedUserName);
+                conn.Send(ServerFrame.Err("version"));
+                return;
             }
+            conn.Send(ServerFrame.Welcome(conn.Mid));
 
-            // Step 3: Send a list of currently connected users to the newly connected client
-            SendConnectedUsersList(client);
-
-            // Step 4: Broadcast a notification to all clients about the new connection
-            BroadcastMessage(client, encryptedUserName);
-
-            // Step 5: Continuously listen for and process messages from this client
-            while (client.Connected)
+            while (true)
             {
-                try
-                {
-                    // Read one newline-delimited message at a time
-                    string line = ProtocolLimits.ReadBoundedLine(reader, ProtocolLimits.MaxLineChars);
+                string line = ProtocolLimits.ReadBoundedLine(reader, ProtocolLimits.MaxLineChars);
+                if (line == null) break;
 
-                    // Exit the loop if the client disconnects (no data received)
-                    if (line == null) break;
-
-                    // Drop and disconnect clients sending anything that is not a plausible Base64 line
-                    line = line.Trim();
-                    if (!IsValidLine(line)) break;
-
-                    // Broadcast the received message to all other clients
-                    BroadcastMessage(client, line);
-                }
-                catch (IOException)
-                {
-                    // Handle client disconnection gracefully
-                    break;
-                }
+                // Any line outside the grammar drops this client only
+                if (!ServerFrame.TryParse(line, out ClientCommand cmd)) break;
+                if (!Dispatch(conn, cmd)) break;
             }
         }
         catch (InvalidDataException)
         {
             // Over-length line: close this client only
         }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
+        {
+            // Client went away or the server is stopping
+        }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error handling client: {ex.Message}");
+            Console.WriteLine($"Error handling client: {ex.GetType().Name}");
         }
         finally
         {
-            // Clean up resources and remove the client from the server's lists
-            lock (clients)
-            {
-                clients.Remove(client);
-            }
-            lock (clientsConnected)
-            {
-                clientsConnected.Remove(encryptedUserName);
-            }
-            client.Close();
+            Cleanup(conn);
         }
     }
 
-    // A relayable line is Base64 only, within the protocol length bounds (also prevents log injection)
-    private static bool IsValidLine(string line)
+    // Executes one validated command; returns false to close the connection.
+    private bool Dispatch(Connection conn, ClientCommand cmd)
     {
-        if (line.Length < ProtocolLimits.MinLineChars || line.Length > ProtocolLimits.MaxLineChars) return false;
-        foreach (char c in line)
+        switch (cmd.Verb)
         {
-            bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-                      || c == '+' || c == '/' || c == '=';
-            if (!ok) return false;
+            case ClientVerb.Hello:
+                return false; // handshake already done
+
+            case ClientVerb.Ping:
+                conn.Send(ServerFrame.Pong);
+                return true;
+
+            case ClientVerb.Join:
+                lock (sync)
+                {
+                    if (conn.Joined.ContainsKey(cmd.Tag)) { conn.Send(ServerFrame.Err("alreadyjoined")); return true; }
+                    if (conn.Joined.Count >= ProtocolLimits.MaxChannelsPerClient) { conn.Send(ServerFrame.Err("limit")); return true; }
+
+                    if (!channels.TryGetValue(cmd.Tag, out Channel channel))
+                        channels[cmd.Tag] = channel = new Channel();
+
+                    // Roster: everyone already in the channel, then the joiner itself last
+                    // (clients use the self entry as the end-of-roster marker).
+                    foreach (Connection m in channel.Members)
+                        conn.Send(ServerFrame.Member(cmd.Tag, m.Mid, m.Joined[cmd.Tag]));
+                    conn.Joined[cmd.Tag] = cmd.Data;
+                    conn.Send(ServerFrame.Member(cmd.Tag, conn.Mid, cmd.Data));
+                    foreach (Connection m in channel.Members)
+                        m.Send(ServerFrame.Joined(cmd.Tag, conn.Mid, cmd.Data));
+                    channel.Members.Add(conn);
+                }
+                return true;
+
+            case ClientVerb.Leave:
+                lock (sync)
+                {
+                    if (!conn.Joined.ContainsKey(cmd.Tag)) { conn.Send(ServerFrame.Err("notjoined")); return true; }
+                    RemoveFromChannel(conn, cmd.Tag);
+                }
+                return true;
+
+            case ClientVerb.Msg:
+                lock (sync)
+                {
+                    if (!conn.Joined.ContainsKey(cmd.Tag)) { conn.Send(ServerFrame.Err("notjoined")); return true; }
+                    Channel channel = channels[cmd.Tag];
+                    long id = ++channel.LastId;
+                    foreach (Connection m in channel.Members)
+                        if (m != conn) m.Send(ServerFrame.Msg(cmd.Tag, id, cmd.Data));
+                    conn.Send(ServerFrame.Ack(cmd.Tag, id));
+                }
+                return true;
+
+            case ClientVerb.Hist:
+                lock (sync)
+                {
+                    // History is a later feature; the grammar is already fixed.
+                    conn.Send(ServerFrame.Err(conn.Joined.ContainsKey(cmd.Tag) ? "unsupported" : "notjoined"));
+                }
+                return true;
+
+            default:
+                return false;
         }
-        return true;
     }
 
-    // Sends the list of all currently connected users to a newly connected client
-    private void SendConnectedUsersList(TcpClient client)
+    // Caller holds sync. Removes the connection from a channel and tells the others.
+    private void RemoveFromChannel(Connection conn, string tag)
     {
-        NetworkStream stream = client.GetStream();
+        conn.Joined.Remove(tag);
+        if (!channels.TryGetValue(tag, out Channel channel)) return;
+        channel.Members.Remove(conn);
+        foreach (Connection m in channel.Members) m.Send(ServerFrame.Left(tag, conn.Mid));
+        if (channel.Members.Count == 0) channels.Remove(tag);
+    }
 
-        lock (clientsConnected)
+    // Emits LEFT for every channel the connection was in (also covers crashes) and closes the socket.
+    private void Cleanup(Connection conn)
+    {
+        lock (sync)
         {
-            foreach (var encryptedUser in clientsConnected)
+            clients.Remove(conn);
+            foreach (string tag in conn.Joined.Keys.ToList())
+                RemoveFromChannel(conn, tag);
+        }
+        conn.Close();
+    }
+
+    private sealed class Channel
+    {
+        public readonly List<Connection> Members = [];
+        public long LastId;
+    }
+
+    private sealed class Connection
+    {
+        private readonly TcpClient tcp;
+        private readonly object writeLock = new();
+
+        public Connection(TcpClient tcp, int mid)
+        {
+            this.tcp = tcp;
+            Mid = mid;
+            Stream = tcp.GetStream();
+            Stream.WriteTimeout = WriteTimeoutMs;
+        }
+
+        public int Mid { get; }
+        public NetworkStream Stream { get; }
+
+        // tag -> presence blob (opaque); guarded by the server's sync lock
+        public Dictionary<string, string> Joined { get; } = [];
+
+        // Writes one line; a failing or stuck peer is closed instead of blocking the server.
+        public void Send(string line)
+        {
+            byte[] buffer = Encoding.ASCII.GetBytes(line + "\n");
+            lock (writeLock)
             {
                 try
                 {
-                    // Send each encrypted username as a separate line
-                    byte[] buffer = Encoding.ASCII.GetBytes(encryptedUser + "\n");
-                    Console.WriteLine(encryptedUser); // Log the sent usernames
-                    stream.Write(buffer, 0, buffer.Length);
+                    Stream.Write(buffer, 0, buffer.Length);
                 }
-                catch (IOException ex)
+                catch (Exception)
                 {
-                    Console.WriteLine($"Error sending connected users: {ex.Message}");
+                    Close();
                 }
             }
         }
-    }
 
-    // Broadcasts a message to all connected clients except the sender
-    private void BroadcastMessage(TcpClient sender, string encryptedMessage)
-    {
-        // Append a newline so every server-to-client unit is exactly one line
-        byte[] buffer = Encoding.ASCII.GetBytes(encryptedMessage + "\n");
-
-        lock (clients)
+        public void Close()
         {
-            foreach (var client in clients)
-            {
-                // Skip sending the message back to the sender
-                if (client != sender)
-                {
-                    try
-                    {
-                        Console.WriteLine(encryptedMessage); // Log the broadcasted message
-                        client.GetStream().Write(buffer, 0, buffer.Length);
-                    }
-                    catch (IOException)
-                    {
-                        // Ignore errors for disconnected clients
-                    }
-                }
-            }
+            try { tcp.Close(); } catch (Exception) { }
         }
     }
 }

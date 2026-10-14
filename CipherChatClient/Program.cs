@@ -1,18 +1,14 @@
-﻿using System.Net.Sockets;
-using System.Net;
+using System.Net.Sockets;
 using System.Text;
-using System.Security;
 
 namespace CipherChatClient;
 
 class Program
 {
-    // List to store messages received from the chat server
-    private static readonly List<string> messages = [];
-
-    // TCP client for establishing and maintaining a connection to the server
-    private static readonly TcpClient client = new();
-    private static NetworkStream stream;
+    private static ChatSession session;
+    private static ChannelState active;
+    private static readonly object ui = new();
+    private static bool suspendRedraw;
 
     // Variables for managing user input, username and encryption key
     private static string currentInput = "";
@@ -37,27 +33,67 @@ class Program
         AppDomain.CurrentDomain.ProcessExit += (sender, e) => OnProcessExit();
 
         // Step 1: Gather the user's username and encryption key
-        //GetUserName();
         GetLogin();
 
-        // Step 2: Connect to the chat server
-        await ConnectToServer();
+        // Step 2: Connect (HELLO/WELCOME) and join the lobby channel
+        session = new ChatSession(serverHost, serverPort, userName, encryptionKey);
+        session.LineAdded += OnLineAdded;
+        session.Status += text => ShowStatus(text);
+        session.Disconnected += () => ShowStatus("Connection closed by the server. Press Esc to quit.");
+        try
+        {
+            await session.ConnectAsync();
+            active = await session.JoinLobbyAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to connect to {serverHost}:{serverPort}: {ex.Message}");
+            return 1;
+        }
+        Redraw();
 
-        // Step 3: Begin receiving messages asynchronously
-        _ = Task.Run(() => ReceiveMessages());
-
-        // Step 4: Main loop to handle user input and send messages
-        while (client.Connected)
+        // Step 3: Main loop to handle user input, commands and messages
+        while (true)
         {
             string input = GetUserInput();
-            if (input.Length > ProtocolLimits.MaxMessageChars)
+            ParsedCommand cmd = Commands.Parse(input);
+            switch (cmd.Kind)
             {
-                AddSystemMessage($"Message too long (max {ProtocolLimits.MaxMessageChars} characters).");
-                continue;
+                case CommandKind.Message:
+                    if (cmd.Arg.Length > ProtocolLimits.MaxMessageChars)
+                    {
+                        ShowStatus($"Message too long (max {ProtocolLimits.MaxMessageChars} characters).");
+                        break;
+                    }
+                    if (string.IsNullOrWhiteSpace(cmd.Arg)) break;
+                    string error = session.Send(active, cmd.Arg);
+                    if (error != null) ShowStatus(error);
+                    break;
+                case CommandKind.Dm:
+                    await OpenDm(cmd.Arg);
+                    break;
+                case CommandKind.Switch:
+                    SwitchTo(cmd.Arg);
+                    break;
+                case CommandKind.Users:
+                    ShowUsers();
+                    break;
+                case CommandKind.Help:
+                    ShowStatus("Commands: /dm <user> (private chat; both type the same pair key), /switch <name|n> (or PgUp/PgDn), /users, /help, /quit. Start a message with // to send a literal /. Esc quits.");
+                    break;
+                case CommandKind.Quit:
+                    Environment.Exit(0);
+                    break;
+                case CommandKind.Join:
+                case CommandKind.Leave:
+                case CommandKind.History:
+                    ShowStatus("That command is not available yet.");
+                    break;
+                default:
+                    ShowStatus($"Unknown command '/{cmd.Arg}'. Type /help.");
+                    break;
             }
-            SendMessage($"{userName}: {input}");
         }
-        return 0;
     }
 
     // Prompt the user for their username and encryption key
@@ -122,196 +158,219 @@ class Program
         return encryptionKey;
     }
 
-    // Establish a connection to the server and notify clients with an encrypted message
-    private static async Task ConnectToServer()
+    // /dm <user>: prompt for the pair key (masked) and open the private channel
+    private static async Task OpenDm(string peer)
     {
+        string problem = MessageRules.ValidateUsername(peer);
+        if (problem != null) { ShowStatus(problem); return; }
+        if (string.Equals(peer, userName, StringComparison.OrdinalIgnoreCase))
+        {
+            ShowStatus("You cannot start a private chat with yourself.");
+            return;
+        }
+
+        string pairKey;
+        lock (ui)
+        {
+            suspendRedraw = true;
+            string prompt = $"Pair key with {peer} (agreed out of band; blank cancels): ";
+            Console.SetCursorPosition(0, Console.WindowHeight - 1);
+            Console.Write(prompt.PadRight(Math.Max(prompt.Length, Console.WindowWidth - 1)));
+            Console.SetCursorPosition(prompt.Length, Console.WindowHeight - 1);
+            pairKey = GetPassword();
+            suspendRedraw = false;
+        }
+        if (pairKey.Length == 0) { ShowStatus("Private chat cancelled."); return; }
+
+        ShowStatus($"Opening private chat with {peer}...");
         try
         {
-            await client.ConnectAsync(serverHost, serverPort);
-            stream = client.GetStream();
-
-            string cipherText = AESecureString.EncryptString($"{userName} is Connected", encryptionKey);
-            byte[] userConnectedCipherBytes = Encoding.ASCII.GetBytes(cipherText + "\n");
-            await stream.WriteAsync(userConnectedCipherBytes);
-
-            Console.WriteLine($"Connected to the server at {serverHost}:{serverPort}...");
+            ChannelState dm = await session.OpenDmAsync(peer, pairKey);
+            Activate(dm);
+            session.AddLocal(dm, $"Private chat with {peer}. It only works if {peer} also ran /dm {userName} with the same pair key.");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to connect to {serverHost}:{serverPort}: {ex.Message}");
+            ShowStatus($"Could not open the private chat: {ex.Message}");
         }
     }
 
-    // Continuously receive and decrypt messages from the server
-    private static async Task ReceiveMessages()
+    private static void SwitchTo(string arg)
     {
-        StreamReader reader = new(stream);
-        int wrongKeyCount = 0;
-
-        while (client.Connected)
-        {
-            try
-            {
-                // Read one newline-delimited message at a time (bounded length)
-                string line = await ProtocolLimits.ReadBoundedLineAsync(reader, ProtocolLimits.MaxLineChars);
-
-                // Exit the loop if the server closes the connection
-                if (line == null) break;
-
-                switch (MessageRules.TryDecrypt(line.Trim(), encryptionKey, out string plainText))
-                {
-                    case DecryptStatus.Ok:
-                        AddSystemMessage(MessageRules.SanitizeForDisplay(plainText));
-                        break;
-                    case DecryptStatus.WrongKey:
-                        // Show on the first failure and then every 10th; never disconnect
-                        if (wrongKeyCount++ % 10 == 0)
-                            AddSystemMessage("Could not decrypt a message: the shared key is probably wrong (or the sender uses an older version).");
-                        break;
-                    default:
-                        AddSystemMessage("Malformed message ignored.");
-                        break;
-                }
-            }
-            catch (InvalidDataException)
-            {
-                AddSystemMessage("Received an over-length line from the server; stopping.");
-                break;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error receiving message: {ex.Message}");
-                break;
-            }
-        }
+        var list = session.Channels;
+        ChannelState target = int.TryParse(arg, out int n) && n >= 1 && n <= list.Count
+            ? list[n - 1]
+            : list.FirstOrDefault(c => string.Equals(c.DisplayName, arg, StringComparison.OrdinalIgnoreCase));
+        if (target == null) { ShowStatus("No such channel. Channels: " + ChannelList()); return; }
+        Activate(target);
     }
 
-    // Adds a line to the message list and redraws, so it is not wiped by the next redraw
-    private static void AddSystemMessage(string text)
+    private static string ChannelList() =>
+        string.Join(", ", session.Channels.Select((c, i) => $"{i + 1}:{c.DisplayName}"));
+
+    private static void CycleChannel(int delta)
     {
-        lock (messages)
+        var list = session.Channels;
+        if (list.Count < 2) return;
+        int i = list.ToList().IndexOf(active);
+        Activate(list[((i + delta) % list.Count + list.Count) % list.Count]);
+    }
+
+    private static void Activate(ChannelState ch)
+    {
+        lock (ui)
         {
-            messages.Add(text);
+            active = ch;
+            lock (ch.Messages) ch.Unread = 0;
+        }
+        Redraw();
+    }
+
+    private static void ShowUsers()
+    {
+        string[] names;
+        lock (active.Members) names = active.Members.Values.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToArray();
+        ShowStatus($"In {active.DisplayName}: {string.Join(", ", names)}");
+    }
+
+    // A status/system line in the active channel (never sent anywhere)
+    private static void ShowStatus(string text)
+    {
+        ChannelState ch = active;
+        if (ch == null) { Console.WriteLine(text); return; }
+        session.AddLocal(ch, MessageRules.SanitizeForDisplay(text));
+    }
+
+    private static void OnLineAdded(ChannelState ch, string text)
+    {
+        Redraw();
+    }
+
+    private static void Redraw()
+    {
+        lock (ui)
+        {
+            if (suspendRedraw || active == null) return;
             DisplayMessages();
             DisplayInputLine();
-        }
-    }
-
-    // Encrypt and send a message to the server
-    private static void SendMessage(string message)
-    {
-        if (!string.IsNullOrWhiteSpace(message))
-        {
-            try
-            {
-                string cipherText = AESecureString.EncryptString(message, encryptionKey);
-                byte[] buffer = Encoding.ASCII.GetBytes(cipherText + "\n");
-                stream?.WriteAsync(buffer, 0, buffer.Length);
-
-                lock (messages)
-                {
-                    messages.Add(message);
-                }
-
-                currentInput = "";
-                currentCursorPosition = 0;
-
-                DisplayMessages();
-                DisplayInputLine();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error sending message: {ex.Message}");
-            }
         }
     }
 
     // Update the console to display the input line for user messages
     private static void DisplayInputLine()
     {
+        const string prompt = "Enter Message: ";
         Console.SetCursorPosition(0, Console.WindowHeight - 1);
-        Console.Write("Enter Message: " + currentInput.PadRight(Console.WindowWidth - "Enter Message: ".Length - 1));
-        Console.SetCursorPosition("Enter Message: ".Length + currentCursorPosition, Console.WindowHeight - 1);
+        Console.Write(prompt + currentInput.PadRight(Math.Max(0, Console.WindowWidth - prompt.Length - 1)));
+        Console.SetCursorPosition(prompt.Length + currentCursorPosition, Console.WindowHeight - 1);
     }
 
-    // Clear the console and display the most recent chat messages
+    // Clear the console and display the header and the most recent messages of the active channel
     private static void DisplayMessages()
     {
         Console.Clear();
+        int width = Math.Max(10, Console.WindowWidth - 1);
 
-        int maxMessagesToShow = Console.WindowHeight - 2;
-
-        lock (messages)
+        var parts = new List<string>();
+        foreach (ChannelState c in session.Channels)
         {
-            var recentMessages = messages.Skip(Math.Max(0, messages.Count - maxMessagesToShow)).ToList();
-            for (int i = 0; i < recentMessages.Count; i++)
-            {
-                Console.SetCursorPosition(0, i);
-                Console.WriteLine(recentMessages[i].PadRight(Console.WindowWidth));
-            }
+            string label = c == active ? $"[{c.DisplayName}]" : c.DisplayName;
+            if (c != active && c.Unread > 0) label += $"({c.Unread})";
+            parts.Add(label);
+        }
+        Console.SetCursorPosition(0, 0);
+        Console.Write(Truncate(string.Join(" ", parts), width));
+
+        int maxMessagesToShow = Console.WindowHeight - 3;
+        List<string> recent;
+        lock (active.Messages)
+        {
+            recent = active.Messages.Skip(Math.Max(0, active.Messages.Count - maxMessagesToShow)).ToList();
+        }
+        for (int i = 0; i < recent.Count; i++)
+        {
+            Console.SetCursorPosition(0, i + 1);
+            Console.Write(Truncate(recent[i], width));
         }
     }
+
+    private static string Truncate(string text, int width) => text.Length <= width ? text : text[..width];
 
     // Capture and process user input for sending messages
     private static string GetUserInput()
     {
-        DisplayInputLine();
-        currentInput = "";
+        lock (ui) { currentInput = ""; currentCursorPosition = 0; DisplayInputLine(); }
 
         while (true)
         {
             ConsoleKeyInfo keyInfo = Console.ReadKey(intercept: true);
 
-            if (keyInfo.Key == ConsoleKey.Enter && currentInput != "")
-                return currentInput;
-
-            switch (keyInfo.Key)
+            lock (ui)
             {
-                case ConsoleKey.Escape:
-                    Environment.Exit(0);
-                    break;
-
-                case ConsoleKey.Backspace:
-                    if (currentCursorPosition > 0)
-                    {
-                        currentInput = currentInput.Remove(currentCursorPosition - 1, 1);
-                        currentCursorPosition--;
-                    }
-                    break;
-
-                case ConsoleKey.Delete:
-                    if (currentCursorPosition < currentInput.Length)
-                    {
-                        currentInput = currentInput.Remove(currentCursorPosition, 1);
-                    }
-                    break;
-
-                case ConsoleKey.Home:
+                if (keyInfo.Key == ConsoleKey.Enter && currentInput != "")
+                {
+                    string result = currentInput;
+                    currentInput = "";
                     currentCursorPosition = 0;
-                    break;
+                    return result;
+                }
 
-                case ConsoleKey.End:
-                    currentCursorPosition = currentInput.Length;
-                    break;
+                switch (keyInfo.Key)
+                {
+                    case ConsoleKey.Escape:
+                        Environment.Exit(0);
+                        break;
 
-                case ConsoleKey.LeftArrow:
-                    if (currentCursorPosition > 0) currentCursorPosition--;
-                    break;
+                    case ConsoleKey.PageUp:
+                        CycleChannel(-1);
+                        break;
 
-                case ConsoleKey.RightArrow:
-                    if (currentCursorPosition < currentInput.Length) currentCursorPosition++;
-                    break;
+                    case ConsoleKey.PageDown:
+                        CycleChannel(1);
+                        break;
 
-                default:
-                    if (!char.IsControl(keyInfo.KeyChar) && currentInput.Length < ProtocolLimits.MaxMessageChars)
-                    {
-                        currentInput = currentInput.Insert(currentCursorPosition, keyInfo.KeyChar.ToString());
-                        currentCursorPosition++;
-                    }
-                    break;
+                    case ConsoleKey.Backspace:
+                        if (currentCursorPosition > 0)
+                        {
+                            currentInput = currentInput.Remove(currentCursorPosition - 1, 1);
+                            currentCursorPosition--;
+                        }
+                        break;
+
+                    case ConsoleKey.Delete:
+                        if (currentCursorPosition < currentInput.Length)
+                        {
+                            currentInput = currentInput.Remove(currentCursorPosition, 1);
+                        }
+                        break;
+
+                    case ConsoleKey.Home:
+                        currentCursorPosition = 0;
+                        break;
+
+                    case ConsoleKey.End:
+                        currentCursorPosition = currentInput.Length;
+                        break;
+
+                    case ConsoleKey.LeftArrow:
+                        if (currentCursorPosition > 0) currentCursorPosition--;
+                        break;
+
+                    case ConsoleKey.RightArrow:
+                        if (currentCursorPosition < currentInput.Length) currentCursorPosition++;
+                        break;
+
+                    default:
+                        if (!char.IsControl(keyInfo.KeyChar) && currentInput.Length < ProtocolLimits.MaxMessageChars)
+                        {
+                            currentInput = currentInput.Insert(currentCursorPosition, keyInfo.KeyChar.ToString());
+                            currentCursorPosition++;
+                        }
+                        break;
+                }
+
+                DisplayInputLine();
             }
-
-            DisplayInputLine();
         }
     }
 
@@ -319,19 +378,13 @@ class Program
     private static void HandleExit(object sender, ConsoleCancelEventArgs e)
     {
         e.Cancel = true; // Prevent abrupt termination
-        OnProcessExit();
         Environment.Exit(0);
     }
 
-    // Notify the server of disconnection and release resources
+    // Close the connection (the server announces the departure to channel members) and clear the screen
     private static void OnProcessExit()
     {
-        if (client.Connected)
-        {
-            SendMessage($"{userName} has Disconnected");
-            client.Close();
-        }
-        
+        session?.Dispose();
         Console.Clear();
     }
 }
