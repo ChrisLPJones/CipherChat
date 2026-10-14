@@ -23,6 +23,22 @@ public class MessageRulesTests
         Assert.Equal(valid, MessageRules.ValidateUsername(name) == null);
     }
 
+    [Theory]
+    [InlineData("lounge", true)]
+    [InlineData("Dev_Team.1-x", true)]
+    [InlineData("", false)]
+    [InlineData("a b", false)]
+    [InlineData("dm:bob", false)]
+    [InlineData("a|b", false)]
+    [InlineData("café", false)]
+    [InlineData("a\u001bb", false)]
+    [InlineData("12345678901234567890123456789012", true)]   // 32 chars
+    [InlineData("123456789012345678901234567890123", false)] // 33 chars
+    public void ValidateRoomName(string name, bool valid)
+    {
+        Assert.Equal(valid, MessageRules.ValidateRoomName(name) == null);
+    }
+
     [Fact]
     public void Sanitizer_StripsControlChars_KeepsUnicode()
     {

@@ -111,4 +111,114 @@ public class ChatSessionTests : IDisposable
         }
         finally { listener.Stop(); }
     }
+
+    [Fact]
+    public async Task Rooms_AreIsolatedFromEachOtherAndTheLobby()
+    {
+        var alice = await Connect("alice", "login-key");
+        var bob = await Connect("bob", "login-key");
+        await alice.JoinLobbyAsync();
+        var bLobby = await bob.JoinLobbyAsync();
+        var aDev = await alice.JoinRoomAsync("Dev", "dev-key");
+        var aOps = await alice.JoinRoomAsync("ops", "ops-key");
+        var bDev = await bob.JoinRoomAsync("dev", "dev-key"); // names are case-insensitive
+        var bOps = await bob.JoinRoomAsync("ops", "other-key"); // wrong key: different, empty channel
+
+        Assert.Equal("dev", aDev.DisplayName);
+        Assert.Equal(aDev.Tag, bDev.Tag);
+        Assert.NotEqual(aOps.Tag, bOps.Tag);
+        Assert.True(WaitMembers(aDev, 2));
+
+        Assert.Null(alice.Send(aDev, "dev news"));
+        Assert.Null(alice.Send(aOps, "ops news"));
+        Assert.True(WaitFor(() => Has(bDev, "alice: dev news")));
+        Assert.False(Has(bOps, "alice: ops news"));
+        Assert.False(Has(bLobby, "alice: dev news"));
+        Assert.False(Has(bOps, "alice: dev news"));
+        Assert.False(Has(bDev, "alice: ops news"));
+    }
+
+    [Fact]
+    public async Task JoinRoom_BlankKeyReusesLoginKey()
+    {
+        var alice = await Connect("alice", "login-key");
+        var bob = await Connect("bob", "login-key");
+        var aRoom = await alice.JoinRoomAsync("lounge", "");
+        var bRoom = await bob.JoinRoomAsync("lounge", null);
+        Assert.Equal(aRoom.Tag, bRoom.Tag);
+        Assert.True(WaitMembers(aRoom, 2));
+    }
+
+    [Fact]
+    public async Task JoinRoom_RejectsBadNameAndSameNameWithAnotherKey_AndReturnsExistingForSameKey()
+    {
+        var alice = await Connect("alice", "login-key");
+        var room = await alice.JoinRoomAsync("lounge", "k1");
+        Assert.Same(room, await alice.JoinRoomAsync("LOUNGE", "k1"));
+        Assert.Single(alice.Channels);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => alice.JoinRoomAsync("lounge", "k2"));
+        Assert.Throws<InvalidOperationException>(() => { _ = alice.JoinRoomAsync("bad name", "k1"); });
+        Assert.Throws<InvalidOperationException>(() => { _ = alice.JoinRoomAsync("dm:bob", "k1"); });
+        Assert.Single(alice.Channels);
+    }
+
+    [Fact]
+    public async Task Leave_StopsDeliveryBothWays_RemovesChannel_AndLobbyCannotBeLeft()
+    {
+        var alice = await Connect("alice", "k");
+        var bob = await Connect("bob", "k");
+        var aLobby = await alice.JoinLobbyAsync();
+        await bob.JoinLobbyAsync();
+        var aRoom = await alice.JoinRoomAsync("lounge", "rk");
+        var bRoom = await bob.JoinRoomAsync("lounge", "rk");
+        Assert.True(WaitMembers(aRoom, 2));
+
+        Assert.NotNull(alice.Leave(aLobby));
+        Assert.Contains(aLobby, alice.Channels);
+
+        Assert.Null(bob.Leave(bRoom));
+        Assert.DoesNotContain(bRoom, bob.Channels);
+        Assert.True(WaitFor(() => Has(aRoom, "bob left")));
+        Assert.NotNull(bob.Leave(bRoom)); // already gone
+
+        Assert.Null(alice.Send(aRoom, "anyone?"));
+        Thread.Sleep(500);
+        Assert.False(Has(bRoom, "alice: anyone?"));
+
+        // Rejoining works and gives a fresh channel state
+        var bAgain = await bob.JoinRoomAsync("lounge", "rk");
+        Assert.NotSame(bRoom, bAgain);
+        Assert.True(WaitFor(() => Has(aRoom, "bob joined")));
+    }
+
+    [Fact]
+    public async Task ChannelCap_17thChannelIsRejectedClientSide()
+    {
+        var alice = await Connect("alice", "k");
+        await alice.JoinLobbyAsync();
+        for (int i = 1; i < CipherChatClient.ProtocolLimits.MaxChannelsPerClient; i++)
+            await alice.JoinRoomAsync("r" + i, "k");
+        Assert.Equal(CipherChatClient.ProtocolLimits.MaxChannelsPerClient, alice.Channels.Count);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => alice.JoinRoomAsync("one-too-many", "k"));
+    }
+
+    [Fact]
+    public async Task Unread_CountsOnlyChannelsThatAreNotActive()
+    {
+        var alice = await Connect("alice", "k");
+        var bob = await Connect("bob", "k");
+        var aLobby = await alice.JoinLobbyAsync();
+        var bLobby = await bob.JoinLobbyAsync();
+        var aRoom = await alice.JoinRoomAsync("lounge", "rk");
+        var bRoom = await bob.JoinRoomAsync("lounge", "rk");
+        Assert.True(WaitMembers(aRoom, 2));
+
+        alice.Active = aLobby;
+        Assert.Null(bob.Send(bLobby, "in lobby"));
+        Assert.Null(bob.Send(bRoom, "in room 1"));
+        Assert.Null(bob.Send(bRoom, "in room 2"));
+        Assert.True(WaitFor(() => Has(aRoom, "bob: in room 2") && Has(aLobby, "bob: in lobby")));
+        Assert.Equal(0, aLobby.Unread);
+        Assert.Equal(2, aRoom.Unread);
+    }
 }

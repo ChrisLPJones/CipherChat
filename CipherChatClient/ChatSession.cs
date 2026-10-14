@@ -27,6 +27,9 @@ public sealed class ChatSession : IDisposable
     }
 
     public string UserName { get; }
+
+    // The channel the user is looking at; its new messages are not counted as unread. Set by the UI.
+    public ChannelState Active { get; set; }
     public int Mid { get; private set; }
     public bool IsClosed => Volatile.Read(ref closed) == 1;
 
@@ -75,6 +78,47 @@ public sealed class ChatSession : IDisposable
     public Task<ChannelState> JoinLobbyAsync() =>
         Task.Run(() => OpenChannel(ChannelKind.Lobby, ChannelId.LobbyName, ChannelId.LobbyName,
             loginKey, ChannelId.DeriveRoomTag(ChannelId.LobbyName, loginKey)));
+
+    // Joins a room. A blank key reuses the login key. The slow tag derivation runs off the caller's thread.
+    // Throws InvalidOperationException for an invalid name, a name already in use with a different key, or the channel cap.
+    public Task<ChannelState> JoinRoomAsync(string room, string key)
+    {
+        string problem = MessageRules.ValidateRoomName(room);
+        if (problem != null) throw new InvalidOperationException(problem);
+        string name = ChannelId.NormalizeRoomName(room);
+        if (string.IsNullOrEmpty(key)) key = loginKey;
+        return Task.Run(() =>
+        {
+            string tag = ChannelId.DeriveRoomTag(name, key);
+            lock (channels)
+            {
+                if (channels.Any(c => c.Kind != ChannelKind.Dm && c.Name == name && c.Tag != tag))
+                    throw new InvalidOperationException($"You are already in '{name}' with a different key. /leave it first.");
+            }
+            var kind = name == ChannelId.LobbyName ? ChannelKind.Lobby : ChannelKind.Room;
+            return OpenChannel(kind, name, name, key, tag);
+        });
+    }
+
+    // Leaves a channel (the lobby cannot be left). Returns an error text or null.
+    public string Leave(ChannelState ch)
+    {
+        if (ch.Kind == ChannelKind.Lobby) return "You cannot leave the lobby.";
+        if (IsClosed) return "Not connected. Press Esc to quit and start the client again.";
+        lock (channels)
+        {
+            if (!channels.Remove(ch)) return "You are not in that channel.";
+        }
+        try
+        {
+            WriteLine(ClientFrame.Leave(ch.Tag));
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        {
+            return $"Error leaving: {ex.Message}";
+        }
+    }
 
     // Opens (or returns) the private channel with another user. Both sides must type the same pair key.
     public Task<ChannelState> OpenDmAsync(string peer, string pairKey) =>
@@ -142,7 +186,7 @@ public sealed class ChatSession : IDisposable
         lock (ch.Messages)
         {
             ch.Messages.Add(text);
-            if (unread) ch.Unread++;
+            if (unread && ch != Active) ch.Unread++;
         }
         LineAdded?.Invoke(ch, text);
     }
