@@ -435,7 +435,15 @@ public sealed class ChatSession : IDisposable
         }
     }
 
+    // Shows a local (system) line in a chat, or on the home tab when chat is null. Never sent anywhere.
     public void AddLocal(PeerChat chat, string text) => AddLine(chat, text, false);
+
+    // Copies for the UI (the lists are also appended to from the receive thread).
+    public List<string> SnapshotLines(PeerChat chat)
+    {
+        List<string> list = chat == null ? HomeLines : chat.Messages;
+        lock (list) return list.ToList();
+    }
 
     // ---- internals ----
 
@@ -491,11 +499,14 @@ public sealed class ChatSession : IDisposable
     {
         lock (gate)
         {
-            if (chat == null) HomeLines.Add(text);
+            if (chat == null) { lock (HomeLines) HomeLines.Add(text); }
             else
             {
-                chat.Messages.Add(text);
-                if (unread && chat != Active) chat.Unread++;
+                lock (chat.Messages)
+                {
+                    chat.Messages.Add(text);
+                    if (unread && chat != Active) chat.Unread++;
+                }
             }
         }
         Raise(() => LineAdded?.Invoke(chat, text));

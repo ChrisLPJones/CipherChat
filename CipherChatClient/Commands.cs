@@ -1,6 +1,6 @@
 namespace CipherChatClient;
 
-public enum CommandKind { Message, Join, Leave, Dm, Switch, Users, History, Help, Quit, Unknown }
+public enum CommandKind { Message, Chat, Accept, Decline, Block, Unblock, Verify, End, Users, Chats, Switch, Help, Quit, Unknown }
 
 public sealed record ParsedCommand(CommandKind Kind, string Arg);
 
@@ -21,12 +21,16 @@ public static class Commands
 
         return name switch
         {
-            "join" => new ParsedCommand(CommandKind.Join, arg),
-            "leave" => new ParsedCommand(CommandKind.Leave, arg),
-            "dm" => new ParsedCommand(CommandKind.Dm, arg),
-            "switch" => new ParsedCommand(CommandKind.Switch, arg),
+            "chat" => new ParsedCommand(CommandKind.Chat, arg),
+            "accept" => new ParsedCommand(CommandKind.Accept, arg),
+            "decline" => new ParsedCommand(CommandKind.Decline, arg),
+            "block" => new ParsedCommand(CommandKind.Block, arg),
+            "unblock" => new ParsedCommand(CommandKind.Unblock, arg),
+            "verify" => new ParsedCommand(CommandKind.Verify, arg),
+            "end" => new ParsedCommand(CommandKind.End, arg),
             "users" => new ParsedCommand(CommandKind.Users, arg),
-            "history" => new ParsedCommand(CommandKind.History, arg),
+            "chats" => new ParsedCommand(CommandKind.Chats, arg),
+            "switch" => new ParsedCommand(CommandKind.Switch, arg),
             "help" => new ParsedCommand(CommandKind.Help, arg),
             "quit" => new ParsedCommand(CommandKind.Quit, arg),
             _ => new ParsedCommand(CommandKind.Unknown, name),

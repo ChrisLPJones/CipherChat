@@ -199,6 +199,24 @@ public class ProfileStoreTests : IDisposable
     }
 
     [Fact]
+    public void Delete_RemovesOnlyTheProfilesFiles()
+    {
+        Store.Create("alice", "h", 1, Pass).Dispose();
+        string dir = Store.ProfilePath("alice", "h", 1);
+        Store.Delete("alice", "h", 1);
+        Assert.False(Directory.Exists(dir));
+        Assert.False(Store.Exists("alice", "h", 1));
+
+        Store.Create("bob", "h", 1, Pass).Dispose();
+        string bobDir = Store.ProfilePath("bob", "h", 1);
+        File.WriteAllText(Path.Combine(bobDir, "unrelated.txt"), "keep me");
+        Store.Delete("bob", "h", 1);
+        Assert.True(File.Exists(Path.Combine(bobDir, "unrelated.txt")));
+        Assert.True(Directory.Exists(bobDir));
+        Store.Delete("nobody", "h", 1); // nothing there: no error
+    }
+
+    [Fact]
     public void PeerBook_PinningRules()
     {
         byte[] k1 = PeerKey(), k2 = PeerKey();

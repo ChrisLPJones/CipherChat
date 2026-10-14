@@ -154,6 +154,19 @@ public sealed class ProfileStore
         return path;
     }
 
+    // Removes a profile that was created in this run but never got a server account (e.g. the name was taken).
+    // Deletes only the known files; the directory is removed only if nothing else is left in it.
+    public void Delete(string user, string host, int port)
+    {
+        string dir = ProfilePath(user, host, port);
+        foreach (string f in new[] { IdentityFile, PeersFile })
+        {
+            string path = Path.Combine(dir, f);
+            if (File.Exists(path)) File.Delete(path);
+        }
+        if (Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir);
+    }
+
     public bool Exists(string user, string host, int port) => File.Exists(Path.Combine(ProfilePath(user, host, port), IdentityFile));
 
     public Profile Create(string user, string host, int port, string passphrase)
