@@ -303,7 +303,7 @@ public sealed class ChatSession : IDisposable
                     cpace.Dispose();
                     cpace = null;
                     SetState(SessionState.Chatting);
-                    AddLine("* Secure session established. The other person proved they know the code.");
+                    AddLine("* Secure session established.");
                     break;
                 default:
                     // MSG before the handshake finished, GONE, ERR, a second PAIRED/WAIT: all the same failure.

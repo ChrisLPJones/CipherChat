@@ -72,7 +72,7 @@ class Program
             if (first == null) return null;
             string problem = PairCode.Validate(PairCode.Normalize(first));
             if (problem != null) { Console.WriteLine(problem); continue; }
-            string second = ReadMasked("Type it again:               ");
+            string second = ReadMasked("Type it again: ");
             if (second == null) return null;
             problem = PairCode.CheckEntry(first, second, out string normalized);
             if (problem == null) return normalized;

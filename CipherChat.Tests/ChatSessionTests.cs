@@ -61,7 +61,7 @@ public class ChatSessionTests : IDisposable
         Assert.Null(b.Send("hello a"));
         Wait.For(() => Has(a, "Them: hello a"), "a receives");
         Assert.True(Has(a, "You: hello b"));
-        Assert.True(Has(a, "The other person proved they know the code"));
+        Assert.True(Has(a, "Secure session established."));
     }
 
     [Fact]
