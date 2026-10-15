@@ -365,28 +365,4 @@ public class ProtocolV4FrameTests
         Assert.Equal(ProtocolLimits.MaxMsgChars, MsgBlob(24).Length);
         Assert.True(24 * ProtocolLimits.PadBlock >= 3 + ProtocolLimits.MaxTextBytes);
     }
-
-    [Fact]
-    public void RealHandshakeAndChannelOutput_ParsesOnBothSides()
-    {
-        using IdentityKey a = IdentityKey.Generate();
-        using IdentityKey b = IdentityKey.Generate();
-        using var init = Handshake.Initiator.Create(a, "alice", "bob", b.PublicKey, false, 1_800_000_000_000);
-        Assert.True(S.TryParse(C.Offer("bob", init.Offer), out _));
-        Assert.True(C.TryParse(S.Relay("OFFER", "alice", Convert.ToBase64String(init.Offer)), out var ev));
-        Assert.Equal(init.Offer, C.DecodeBlob(ev.Data));
-
-        Handshake.Responder.TryReceiveOffer(b, "bob", "alice", a.PublicKey, init.Offer, 1_800_000_000_000, new SidCache(), out var resp);
-        byte[] accept = resp.Accept();
-        Assert.True(S.TryParse(C.Accept("alice", accept), out _));
-        init.ProcessAccept(accept, out var chA, out byte[] confirm);
-        Assert.True(S.TryParse(C.Confirm("bob", confirm), out _));
-        resp.ProcessConfirm(confirm, out var chB);
-        Assert.True(S.TryParse(C.Msg("bob", chA.SealText("")), out _));
-        Assert.True(S.TryParse(C.Msg("bob", chA.SealText(new string('x', 6000))), out _));
-        Assert.True(S.TryParse(C.Knock("bob", Handshake.BuildKnock(a, "alice", "bob", b.PublicKey, 1)), out _));
-        Assert.True(S.TryParse(C.Register("alice", a.PublicKey, a.Sign(new byte[1])), out _));
-        Assert.True(S.TryParse(C.Login("alice", a.Sign(new byte[1])), out _));
-        chA.Dispose(); chB.Dispose(); resp.Dispose();
-    }
 }

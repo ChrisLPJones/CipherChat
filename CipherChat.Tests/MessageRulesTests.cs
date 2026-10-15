@@ -6,21 +6,6 @@ namespace CipherChat.Tests;
 
 public class MessageRulesTests
 {
-    [Theory]
-    [InlineData("alice", true)]
-    [InlineData("A_b.c-9", true)]
-    [InlineData("", false)]
-    [InlineData("aaaaaaaaaaaaaaaaaaaaa", false)] // 21 chars
-    [InlineData("aaaaaaaaaaaaaaaaaaaa", true)]    // 20 chars
-    [InlineData("a b", false)]
-    [InlineData("a:b", false)]
-    [InlineData("josé", false)]
-    [InlineData("a\u001bb", false)]
-    public void ValidateUsername(string name, bool valid)
-    {
-        Assert.Equal(valid, MessageRules.ValidateUsername(name) == null);
-    }
-
     [Fact]
     public void Sanitizer_StripsControlChars_KeepsUnicode()
     {

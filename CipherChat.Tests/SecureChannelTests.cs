@@ -13,8 +13,8 @@ public class SecureChannelTests
     private static (SecureChannel a, SecureChannel b) Pair()
     {
         byte[] sid = Enumerable.Range(0, 16).Select(i => (byte)(0xA0 + i)).ToArray();
-        return (new SecureChannel(sid, "alice", "bob", Seq(1), Seq(101)),
-                new SecureChannel(sid, "bob", "alice", Seq(101), Seq(1)));
+        return (new SecureChannel(sid, Seq(1), Seq(101)),
+                new SecureChannel(sid, Seq(101), Seq(1)));
     }
 
     [Fact]
@@ -47,7 +47,7 @@ public class SecureChannelTests
         int chars = Convert.ToBase64String(msg).Length;
         Assert.InRange(chars, ProtocolLimits.MinMsgChars, ProtocolLimits.MaxMsgChars);
         OpenResult r = b.Open(msg);
-        Assert.Equal((OpenStatus.Ok, MessageKind.Text, text, 0L), (r.Status, r.Kind, r.Text, r.Lost));
+        Assert.Equal((OpenStatus.Ok, MessageKind.Text, text), (r.Status, r.Kind, r.Text));
     }
 
     [Fact]
@@ -94,28 +94,36 @@ public class SecureChannelTests
     }
 
     [Fact]
-    public void ForgedFarAheadLine_DoesNotDesyncTheSession()
+    public void ForgedFarAheadLine_IsRejected_WithoutDesyncingTheSession()
     {
         var (a, b) = Pair();
         byte[] m0 = a.SealText("zero");
         byte[] m1 = a.SealText("one");
         byte[] forged = (byte[])m1.Clone();
         forged[25] = 50; // claims n = 50
-        Assert.Equal(OpenStatus.AuthFailed, b.Open(forged).Status);
+        Assert.Equal(OpenStatus.OutOfOrder, b.Open(forged).Status);
         Assert.Equal("zero", b.Open(m0).Text);
         Assert.Equal("one", b.Open(m1).Text);
     }
 
     [Fact]
-    public void WrongAadNames_FailToOpen()
+    public void OldVersionByte_IsRejected()
     {
-        byte[] sid = new byte[16];
-        var a = new SecureChannel(sid, "alice", "bob", Seq(1), Seq(101));
-        var wrongRecipient = new SecureChannel(sid, "carol", "alice", Seq(101), Seq(1));
-        var wrongSender = new SecureChannel(sid, "bob", "dave", Seq(101), Seq(1));
-        byte[] msg = a.SealText("hello");
-        Assert.Equal(OpenStatus.AuthFailed, wrongRecipient.Open(msg).Status);
-        Assert.Equal(OpenStatus.AuthFailed, wrongSender.Open(msg).Status);
+        var (a, b) = Pair();
+        byte[] m = a.SealText("hello");
+        m[0] = 0x04;
+        Assert.Equal(OpenStatus.Malformed, b.Open(m).Status);
+        m[0] = 0x05;
+        Assert.Equal("hello", b.Open(m).Text);
+    }
+
+    [Fact]
+    public void HeaderIsAuthenticated_BindsSessionAndNumber()
+    {
+        // The AAD is the header: a message sealed in another session is never accepted, even under the same chain keys.
+        var (a, _) = Pair();
+        var other = new SecureChannel(Enumerable.Repeat((byte)7, 16).ToArray(), Seq(101), Seq(1));
+        Assert.Equal(OpenStatus.UnknownSession, other.Open(a.SealText("x")).Status);
     }
 
     [Fact]
@@ -131,18 +139,18 @@ public class SecureChannelTests
     }
 
     [Fact]
-    public void Gap_UpToHundredIsAcceptedWithLossCount_BeyondIsDropped()
+    public void Reorder_Gap_AndWithholding_AreRejected_WithoutStateChange()
     {
         var (a, b) = Pair();
-        byte[][] msgs = Enumerable.Range(0, 250).Select(i => a.SealText("m" + i)).ToArray();
-        Assert.Equal(OpenStatus.TooFarAhead, b.Open(msgs[101]).Status);
-        OpenResult r = b.Open(msgs[100]);
-        Assert.Equal((OpenStatus.Ok, 100L, "m100"), (r.Status, r.Lost, r.Text));
-        Assert.Equal(OpenStatus.Replay, b.Open(msgs[50]).Status);
-        r = b.Open(msgs[101]);
-        Assert.Equal((OpenStatus.Ok, 0L), (r.Status, r.Lost));
-        Assert.Equal(OpenStatus.TooFarAhead, b.Open(msgs[250 - 1]).Status);
-        Assert.Equal(102UL, b.ReceivedCount);
+        byte[][] msgs = Enumerable.Range(0, 5).Select(i => a.SealText("m" + i)).ToArray();
+        Assert.Equal(OpenStatus.OutOfOrder, b.Open(msgs[1]).Status);   // message 0 withheld or reordered
+        Assert.Equal(OpenStatus.OutOfOrder, b.Open(msgs[4]).Status);
+        Assert.Equal(0UL, b.ReceivedCount);
+        Assert.Equal("m0", b.Open(msgs[0]).Text);
+        Assert.Equal("m1", b.Open(msgs[1]).Text);
+        Assert.Equal(OpenStatus.OutOfOrder, b.Open(msgs[3]).Status);   // m2 skipped
+        Assert.Equal(OpenStatus.Replay, b.Open(msgs[0]).Status);
+        Assert.Equal(2UL, b.ReceivedCount);
     }
 
     [Fact]
@@ -160,22 +168,22 @@ public class SecureChannelTests
         wrongType[1] = 0x11;
         Assert.Equal(OpenStatus.Malformed, b.Open(wrongType).Status);
         byte[] tooBig = new byte[26 + 256 * 25 + 16];
-        tooBig[0] = 4; tooBig[1] = 0x10;
+        tooBig[0] = 5; tooBig[1] = 0x10;
         Assert.Equal(OpenStatus.Malformed, b.Open(tooBig).Status);
     }
 
     // Seals an arbitrary plaintext the way the sender would, to test receiver-side plaintext rules.
-    private static byte[] SealRaw(byte[] ckSend, ulong n, byte[] plaintext, string sender, string recipient, byte[] sid)
+    private static byte[] SealRaw(byte[] ckSend, ulong n, byte[] plaintext, byte[] sid)
     {
         byte[] ck = ckSend;
         for (ulong i = 0; i < n; i++) ck = SecureChannel.NextChainKey(ck);
         byte[] header = new byte[26];
-        header[0] = 4; header[1] = 0x10;
+        header[0] = 5; header[1] = 0x10;
         sid.CopyTo(header, 2);
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(header.AsSpan(18), n);
         byte[] nonce = new byte[12];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(nonce.AsSpan(4), n);
-        byte[] aad = Proto.Concat(header, Proto.Lp(sender), Proto.Lp(recipient));
+        byte[] aad = header;
         byte[] ct = new byte[plaintext.Length], tag = new byte[16];
         using AesGcm g = new(SecureChannel.MessageKey(ck), 16);
         g.Encrypt(nonce, plaintext, ct, tag, aad);
@@ -186,38 +194,38 @@ public class SecureChannelTests
     public void NonZeroPaddingAndBadPlaintextShapes_AreRejected()
     {
         byte[] sid = new byte[16];
-        var b = new SecureChannel(sid, "bob", "alice", Seq(101), Seq(1));
+        var b = new SecureChannel(sid, Seq(101), Seq(1));
         byte[] pt = new byte[256];
         pt[0] = 1; pt[1] = 0; pt[2] = 2; pt[3] = (byte)'h'; pt[4] = (byte)'i';
-        Assert.Equal(OpenStatus.Ok, b.Open(SealRaw(Seq(1), 0, pt, "alice", "bob", sid)).Status);
+        Assert.Equal(OpenStatus.Ok, b.Open(SealRaw(Seq(1), 0, pt, sid)).Status);
 
         byte[] dirty = (byte[])pt.Clone();
         dirty[200] = 1;
-        Assert.Equal(OpenStatus.BadPlaintext, b.Open(SealRaw(Seq(1), 1, dirty, "alice", "bob", sid)).Status);
+        Assert.Equal(OpenStatus.BadPlaintext, b.Open(SealRaw(Seq(1), 1, dirty, sid)).Status);
 
         byte[] badLen = (byte[])pt.Clone();
         badLen[1] = 0xFF; badLen[2] = 0xFF;
-        Assert.Equal(OpenStatus.BadPlaintext, b.Open(SealRaw(Seq(1), 2, badLen, "alice", "bob", sid)).Status);
+        Assert.Equal(OpenStatus.BadPlaintext, b.Open(SealRaw(Seq(1), 2, badLen, sid)).Status);
 
         byte[] badKind = (byte[])pt.Clone();
         badKind[0] = 9;
-        Assert.Equal(OpenStatus.BadPlaintext, b.Open(SealRaw(Seq(1), 3, badKind, "alice", "bob", sid)).Status);
+        Assert.Equal(OpenStatus.BadPlaintext, b.Open(SealRaw(Seq(1), 3, badKind, sid)).Status);
 
         byte[] endWithText = (byte[])pt.Clone();
         endWithText[0] = 2;
-        Assert.Equal(OpenStatus.BadPlaintext, b.Open(SealRaw(Seq(1), 4, endWithText, "alice", "bob", sid)).Status);
+        Assert.Equal(OpenStatus.BadPlaintext, b.Open(SealRaw(Seq(1), 4, endWithText, sid)).Status);
 
         byte[] notPadded = new byte[300];
         notPadded[0] = 1;
-        Assert.Equal(OpenStatus.Malformed, b.Open(SealRaw(Seq(1), 5, notPadded, "alice", "bob", sid)).Status);
+        Assert.Equal(OpenStatus.Malformed, b.Open(SealRaw(Seq(1), 5, notPadded, sid)).Status);
 
         byte[] overPadded = new byte[512];
         overPadded[0] = 1; overPadded[2] = 2; overPadded[3] = (byte)'h';
-        Assert.Equal(OpenStatus.BadPlaintext, b.Open(SealRaw(Seq(1), 6, overPadded, "alice", "bob", sid)).Status);
+        Assert.Equal(OpenStatus.BadPlaintext, b.Open(SealRaw(Seq(1), 5, overPadded, sid)).Status);
 
         byte[] badUtf8 = (byte[])pt.Clone();
         badUtf8[3] = 0xFF; badUtf8[4] = 0xFE;
-        Assert.Equal(OpenStatus.BadPlaintext, b.Open(SealRaw(Seq(1), 7, badUtf8, "alice", "bob", sid)).Status);
+        Assert.Equal(OpenStatus.BadPlaintext, b.Open(SealRaw(Seq(1), 6, badUtf8, sid)).Status);
     }
 
     [Fact]
@@ -271,7 +279,7 @@ public class SecureChannelTests
     public void SessionEndsAfterMaxMessages()
     {
         byte[] sid = new byte[16];
-        var a = new SecureChannel(sid, "alice", "bob", Seq(1), Seq(101));
+        var a = new SecureChannel(sid, Seq(1), Seq(101));
         // Fast-forward by sealing without keeping output would take 100k AES ops (fast enough, ~1 s).
         for (int i = 0; i < SecureChannel.MaxMessages; i++) a.SealEnd();
         Assert.Throws<InvalidOperationException>(() => a.SealText("one too many"));

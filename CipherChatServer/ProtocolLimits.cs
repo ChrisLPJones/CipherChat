@@ -28,6 +28,8 @@ public static class ProtocolLimits
     public const int MaxChats = 16;
     public const int MaxPendingRequests = 20;
     public const int MaxUserListEntries = 100;
+    public const int MinCodeChars = 12;     // v5
+    public const int MaxCodeChars = 100;    // v5
 
     // Reads one newline-delimited line, never buffering more than maxChars characters.
     // Returns null at end of stream; throws InvalidDataException when the line is too long.

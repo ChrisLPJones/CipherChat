@@ -4,7 +4,8 @@ using System.Text;
 
 namespace CipherChatClient;
 
-public enum OpenStatus { Ok, Malformed, UnknownSession, Replay, TooFarAhead, AuthFailed, BadPlaintext, Exhausted }
+// Every status except Ok means the message was rejected and the chat should end (strict order, no gaps).
+public enum OpenStatus { Ok, Malformed, UnknownSession, Replay, OutOfOrder, AuthFailed, BadPlaintext, Exhausted }
 public enum MessageKind : byte { Text = 0x01, EndOfSession = 0x02 }
 
 public sealed class OpenResult
@@ -12,28 +13,25 @@ public sealed class OpenResult
     public OpenStatus Status { get; init; }
     public MessageKind Kind { get; init; }
     public string Text { get; init; }
-    public long Lost { get; init; }   // messages skipped before this one (lost or withheld)
 }
 
-// One established 1:1 session. Per direction a symmetric hash chain gives a fresh key per message:
+// One established 1:1 session (protocol v5). Per direction a symmetric hash chain gives a fresh key per message:
 //   mk_n = HMAC(ck_n, 0x01), ck_{n+1} = HMAC(ck_n, 0x02); ck_n and mk_n are zeroed after use.
-// MSG bytes: ver(1)=4 | type(1)=0x10 | sid(16) | n(8) | ciphertext(256*k) | gcmTag(16).
-// Nonce = 4 zero bytes || n (a key is used for exactly one message). AAD = header || lp(sender) || lp(recipient).
+// MSG bytes: ver(1)=5 | type(1)=0x10 | sid(16) | n(8) | ciphertext(256*k) | gcmTag(16).
+// Nonce = 4 zero bytes || n (a key is used for exactly one message). AAD = the 26-byte header.
+// Strict order: message n must be exactly the next expected number; anything else is rejected.
 // Plaintext = kind(1) || len(2) || UTF-8 text || zero padding to a multiple of 256 bytes.
 public sealed class SecureChannel : IDisposable
 {
-    public const byte Version = 0x04;
+    public const byte Version = 0x05;
     public const byte TypeMsg = 0x10;
     public const int HeaderBytes = 26;
     public const int TagBytes = 16;
     public const int MaxMessages = 100_000;
-    public const int MaxGap = 100;
     private const int MaxBlocks = 24;
 
     private readonly object gate = new();
     private readonly byte[] sid;
-    private readonly string me;
-    private readonly string peer;
     private byte[] sendCk;
     private byte[] recvCk;
     private ulong sendN;
@@ -41,16 +39,13 @@ public sealed class SecureChannel : IDisposable
     private bool disposed;
 
     // Ownership of the chain keys passes to the channel (it zeroes them).
-    public SecureChannel(byte[] sid, string me, string peer, byte[] sendChainKey, byte[] recvChainKey)
+    public SecureChannel(byte[] sid, byte[] sendChainKey, byte[] recvChainKey)
     {
         if (sid == null || sid.Length != 16 || sendChainKey.Length != 32 || recvChainKey.Length != 32)
             throw new ArgumentException("Invalid channel parameters.");
         this.sid = (byte[])sid.Clone();
-        this.me = me;
-        this.peer = peer;
         sendCk = sendChainKey;
         recvCk = recvChainKey;
-        Proto.Lp(me); Proto.Lp(peer); // validates the names
     }
 
     public byte[] SessionId => (byte[])sid.Clone();
@@ -87,7 +82,7 @@ public sealed class SecureChannel : IDisposable
             utf8.CopyTo(pt, 3);
 
             byte[] header = Header(sendN);
-            byte[] aad = Proto.Concat(header, Proto.Lp(me), Proto.Lp(peer));
+            byte[] aad = header;
             byte[] mk = MessageKey(sendCk);
             byte[] nextCk = NextChainKey(sendCk);
             byte[] msg = new byte[HeaderBytes + pt.Length + TagBytes];
@@ -123,27 +118,21 @@ public sealed class SecureChannel : IDisposable
 
             ulong n = BinaryPrimitives.ReadUInt64BigEndian(msg.AsSpan(18, 8));
             if (n < recvN) return Fail(OpenStatus.Replay);
-            if (n - recvN > MaxGap) return Fail(OpenStatus.TooFarAhead);
+            if (n > recvN) return Fail(OpenStatus.OutOfOrder);
             if (n >= MaxMessages) return Fail(OpenStatus.Exhausted);
 
-            // Advance a copy of the chain; commit only if GCM verifies.
+            // Derive from a copy of the chain; commit only if GCM verifies.
             byte[] ck = (byte[])recvCk.Clone();
             byte[] nextCk = null;
             byte[] mk = null;
             byte[] pt = null;
             try
             {
-                for (ulong i = recvN; i < n; i++)
-                {
-                    byte[] step = NextChainKey(ck);
-                    CryptographicOperations.ZeroMemory(ck);
-                    ck = step;
-                }
                 mk = MessageKey(ck);
                 nextCk = NextChainKey(ck);
                 int ctLen = msg.Length - HeaderBytes - TagBytes;
                 pt = new byte[ctLen];
-                byte[] aad = Proto.Concat(msg.AsSpan(0, HeaderBytes).ToArray(), Proto.Lp(peer), Proto.Lp(me));
+                byte[] aad = msg.AsSpan(0, HeaderBytes).ToArray();
                 try
                 {
                     using AesGcm gcm = new(mk, TagBytes);
@@ -160,9 +149,8 @@ public sealed class SecureChannel : IDisposable
                 CryptographicOperations.ZeroMemory(recvCk);
                 recvCk = nextCk;
                 nextCk = null;
-                long lost = (long)(n - recvN);
                 recvN = n + 1;
-                return Interpret(pt, lost);
+                return Interpret(pt);
             }
             finally
             {
@@ -176,7 +164,7 @@ public sealed class SecureChannel : IDisposable
 
     private static OpenResult Fail(OpenStatus s) => new() { Status = s };
 
-    private static OpenResult Interpret(byte[] pt, long lost)
+    private static OpenResult Interpret(byte[] pt)
     {
         MessageKind kind = (MessageKind)pt[0];
         int len = BinaryPrimitives.ReadUInt16BigEndian(pt.AsSpan(1, 2));
@@ -192,7 +180,7 @@ public sealed class SecureChannel : IDisposable
             try { text = new UTF8Encoding(false, true).GetString(pt, 3, len); }
             catch (ArgumentException) { return Fail(OpenStatus.BadPlaintext); }
         }
-        return new OpenResult { Status = OpenStatus.Ok, Kind = kind, Text = text, Lost = lost };
+        return new OpenResult { Status = OpenStatus.Ok, Kind = kind, Text = text };
     }
 
     private byte[] Header(ulong n)

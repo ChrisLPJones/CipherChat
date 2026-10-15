@@ -108,7 +108,16 @@ public static class ClientFrame
         return true;
     }
 
-    public static bool IsUser(string s) => Proto.IsUserName(s);
+    public static bool IsUser(string s)
+    {
+        if (s == null || s.Length < ProtocolLimits.MinUsernameLength || s.Length > ProtocolLimits.MaxUsernameLength) return false;
+        foreach (char c in s)
+        {
+            bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
+            if (!ok) return false;
+        }
+        return true;
+    }
 
     public static bool IsBase64Bytes(string s, int bytes) => TryBase64ByteLength(s, out int n) && n == bytes;
 
