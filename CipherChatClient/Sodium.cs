@@ -15,11 +15,11 @@ internal static class Sodium
 
     private const string Lib = "libsodium";
 
-    [DllImport(Lib)] private static extern int sodium_init();
-    [DllImport(Lib)] private static extern int crypto_core_ristretto255_from_hash(byte[] p, byte[] r);
-    [DllImport(Lib)] private static extern void crypto_core_ristretto255_scalar_random(byte[] r);
-    [DllImport(Lib)] private static extern int crypto_scalarmult_ristretto255(byte[] q, byte[] n, byte[] p);
-    [DllImport(Lib)]
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] private static extern int sodium_init();
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] private static extern int crypto_core_ristretto255_from_hash(byte[] p, byte[] r);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] private static extern void crypto_core_ristretto255_scalar_random(byte[] r);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)] private static extern int crypto_scalarmult_ristretto255(byte[] q, byte[] n, byte[] p);
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     private static extern int crypto_pwhash(byte[] output, ulong outlen, byte[] passwd, ulong passwdlen, byte[] salt,
         ulong opslimit, nuint memlimit, int alg);
 

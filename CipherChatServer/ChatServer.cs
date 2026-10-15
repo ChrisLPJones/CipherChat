@@ -43,7 +43,8 @@ public class ChatServer : IDisposable
     {
         public Connection A, B;               // A = role 1, B = role 2
         public string Rid;
-        public bool Productive;               // at least one MSG was relayed
+        public volatile bool AToB, BToA;      // an MSG was relayed from role 1 to role 2 / from role 2 to role 1
+        public bool Productive => AToB && BToA;   // only a two-way exchange counts (the clients' handles guarantee it for real chats)
         public bool Ended;
         public bool Quiet;                    // both sides were told ERR timeout: no GONE on top
         public CancellationTokenSource ConfirmTimer = new();
@@ -288,7 +289,7 @@ public class ChatServer : IDisposable
         Connection peer = pair.Other(conn);
         // The peer must have been told about the pairing before anything is relayed to it.
         if (!peer.PairedSent.Wait(WriteTimeoutMs)) return false;
-        if (cmd.Verb == ClientVerb.Msg) pair.Productive = true;
+        if (cmd.Verb == ClientVerb.Msg) { if (conn == pair.A) pair.AToB = true; else pair.BToA = true; }
         peer.Send(ServerFrame.Relay(cmd.Verb, cmd.Data));
         return true;
     }

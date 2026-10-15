@@ -499,6 +499,22 @@ public class MaliciousServerTests : IDisposable
         Assert.DoesNotContain(r.S.SnapshotLines(), l => l.Contains('\u001b'));
     }
 
+    [Fact]
+    public async Task LoneSurrogate_IsRefusedByThePlainMessage_NothingIsSent_AndTheChatGoesOn()
+    {
+        Rig r = await Chatting();
+        string bad = "hello \uD83D";                         // an emoji cut in half (e.g. by a Backspace)
+        Assert.Equal("That message contains invalid characters.", r.S.Send(bad));
+        Assert.Equal("That message contains invalid characters.", r.S.Send("\uDE00 x"));
+        Thread.Sleep(200);
+        Assert.False(r.Srv.Saw("MSG"));
+        Assert.Equal(SessionState.Chatting, r.S.State);
+        Assert.DoesNotContain(r.S.SnapshotLines(), l => l.StartsWith("You:"));
+        Assert.Null(r.S.Send("ok \U0001F600"));              // a whole emoji is fine, and it is message number 0 (no chain step was used)
+        string line = r.Srv.Wait(l => l.StartsWith("MSG "));
+        Assert.Equal("ok \U0001F600", r.FakeChannel.Open(ClientFrame.DecodeBlob(line.Split(' ')[1])).Text);
+    }
+
     // ---- wire hygiene ----
 
     [Fact]

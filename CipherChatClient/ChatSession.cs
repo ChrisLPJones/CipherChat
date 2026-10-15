@@ -160,6 +160,7 @@ public sealed class ChatSession : IDisposable
                 WriteLine(ClientFrame.Msg(channel.SealText(text)));
             }
             catch (InvalidOperationException) { EndLocked(EndReason.SessionLimit); return null; }
+            catch (ArgumentException) { return "That message contains invalid characters."; }   // e.g. a lone surrogate; nothing was sent
             catch (Exception ex) when (ex is IOException or ObjectDisposedException)
             {
                 EndLocked(EndReason.ConnectionLost);
@@ -211,6 +212,12 @@ public sealed class ChatSession : IDisposable
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException)
         {
+        }
+        catch (Exception)
+        {
+            // Anything unexpected must not leave a session alive with no receiver: end it through the failure path.
+            End(state == SessionState.Chatting ? EndReason.MessageFailed : EndReason.SecurityFailure);
+            return;
         }
         // The connection closed on its own.
         lock (gate)

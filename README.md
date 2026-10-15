@@ -191,9 +191,10 @@ tricked into sharing the key with the wrong user; a handle used as proof of iden
 attackers (a recording could be decrypted later by one).
 
 **Server abuse limits** (the server holds no secrets): 200 connections in total, 4 per IP, at most 100 waiting users,
-10 new connections per IP per minute, at most 5 pairings per IP per hour that relay no message, one pairing per rendezvous id
+10 `HELLO`s per IP per minute (connections over the caps are refused separately), at most 5 pairings per IP per hour in which
+messages were not relayed in both directions (a real chat always does, because each side sends its handle first), one pairing per rendezvous id
 (then burned for an hour), `HELLO` within 10 seconds, both `CONFIRM`s within 30 seconds after pairing, 90 seconds without any line
-closes a connection (clients ping every 30 seconds), messages 10 per second (burst 30), pings 4 per minute.
+closes a connection (clients ping every 30 seconds), messages 10 per second (burst 30), pings a burst of 4 that refills at 4 per minute.
 A user waiting without a time limit occupies a waiting slot; these limits bound how many one address can hold.
 
 ## Tests

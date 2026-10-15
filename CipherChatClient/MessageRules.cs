@@ -8,6 +8,13 @@ public static class MessageRules
 {
     public const string NeutralPeerLabel = "Them";
 
+    // How many UTF-16 units Backspace removes before the cursor: 2 for a surrogate pair (one emoji), otherwise 1.
+    public static int BackspaceLength(string text, int cursor)
+    {
+        if (cursor >= 2 && char.IsLowSurrogate(text[cursor - 1]) && char.IsHighSurrogate(text[cursor - 2])) return 2;
+        return cursor >= 1 ? 1 : 0;
+    }
+
     // Returns null when valid, otherwise the reason in plain words. A handle is a display name, not an identity:
     // 1-20 characters from [A-Za-z0-9_.-]; "you" is reserved because own lines are shown as "You:".
     public static string ValidateHandle(string handle)

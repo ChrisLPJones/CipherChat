@@ -369,20 +369,47 @@ public class ServerIntegrationTests : IDisposable
     }
 
     [Fact]
-    public void ProductivePairings_DoNotCountAgainstTheIp()
+    public void TwoWayPairings_AreProductive_AndDoNotCountAgainstTheIp()
     {
         var s = Start(new ServerLimits { MaxConnectionsPerIp = 100, HellosPerIpPerMinute = 1000, UnproductivePairingsPerIpPerHour = 1 });
         for (int i = 1; i <= 4; i++)
         {
             var (a, b) = Paired(s, $"2000{i:00}");
             Handshake(a, b);
-            a.SendLine($"MSG {MsgB64()}");
+            a.SendLine($"MSG {MsgB64()}");                 // like the clients' handles: one message each way
             Assert.StartsWith("MSG ", b.ReadLine());
+            b.SendLine($"MSG {MsgB64()}");
+            Assert.StartsWith("MSG ", a.ReadLine());
             a.Dispose(); b.Dispose();
             Wait.For(() => s.ConnectionCount == 0, "pair ended");
         }
         using var c = Join(s, "200099", 'c', out string reply);
         Assert.Equal("WAIT", reply);
+    }
+
+    [Fact]
+    public void OneWayTraffic_IsStillUnproductive_SoAPipeliningAttackerIsCharged()
+    {
+        var s = Start(new ServerLimits { MaxConnectionsPerIp = 100, HellosPerIpPerMinute = 1000, UnproductivePairingsPerIpPerHour = 5 });
+        for (int i = 1; i <= 5; i++)
+        {
+            // a waiting victim; the attacker joins and pipelines KEY, CONFIRM and one junk MSG without waiting for anything
+            var victim = Join(s, $"3000{i:00}", 'a', out string w);
+            Assert.Equal("WAIT", w);
+            var attacker = Join(s, $"3000{i:00}", 'b', out string p);
+            Assert.StartsWith("PAIRED 2", p);
+            attacker.SendLine($"KEY {KeyB64()}\nCONFIRM {ConfirmB64()}\nMSG {MsgB64()}");
+            Assert.StartsWith("KEY ", victim.ReadLine() == $"PAIRED 1 {Nonce('b')}" ? victim.ReadLine() : null);
+            Assert.StartsWith("CONFIRM ", victim.ReadLine());
+            Assert.StartsWith("MSG ", victim.ReadLine());
+            attacker.Dispose(); victim.Dispose();
+            Wait.For(() => s.ConnectionCount == 0, "pair ended");
+        }
+        using var c = Join(s, "300099", 'c', out string reply);
+        Assert.Equal("ERR rate", reply);                    // the 6th HELLO from the charged IP is refused
+        Advance(3600_000);
+        using var d = Join(s, "300099", 'd', out string again);
+        Assert.Equal("WAIT", again);
     }
 
     // ---- deadlines ----

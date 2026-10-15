@@ -117,7 +117,7 @@ class Program
             {
                 case ConsoleKey.Enter: if (currentInput.Length > 0) { done = currentInput; currentInput = ""; cursor = 0; } break;
                 case ConsoleKey.Escape: quit = true; break;
-                case ConsoleKey.Backspace: if (cursor > 0) { currentInput = currentInput.Remove(cursor - 1, 1); cursor--; } break;
+                case ConsoleKey.Backspace: { int n = MessageRules.BackspaceLength(currentInput, cursor); if (n > 0) { currentInput = currentInput.Remove(cursor - n, n); cursor -= n; } break; }
                 case ConsoleKey.Delete: if (cursor < currentInput.Length) currentInput = currentInput.Remove(cursor, 1); break;
                 case ConsoleKey.Home: cursor = 0; break;
                 case ConsoleKey.End: cursor = currentInput.Length; break;

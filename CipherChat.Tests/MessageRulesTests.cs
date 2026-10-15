@@ -32,6 +32,20 @@ public class MessageRulesTests
         if (!valid) Assert.False(string.IsNullOrEmpty(MessageRules.ValidateHandle(handle)));   // always a plain message
     }
 
+    [Theory]
+    [InlineData("abc", 3, 1)]
+    [InlineData("abc", 1, 1)]
+    [InlineData("abc", 0, 0)]
+    [InlineData("a\U0001F600", 3, 2)]       // emoji = surrogate pair: removed whole
+    [InlineData("a\U0001F600", 1, 1)]
+    [InlineData("\U0001F600\U0001F600", 2, 2)]
+    [InlineData("\U0001F600\U0001F600", 4, 2)]
+    [InlineData("\uD83D", 1, 1)]             // a lone surrogate is removed on its own
+    [InlineData("\uDE00\uDE00", 2, 1)]       // two low surrogates are not a pair
+    [InlineData("\uD83D\uD83D", 2, 1)]
+    public void BackspaceLength_RemovesAWholeSurrogatePair(string text, int cursor, int expected) =>
+        Assert.Equal(expected, MessageRules.BackspaceLength(text, cursor));
+
     [Fact]
     public void Sanitizer_StripsControlChars_KeepsUnicode()
     {
