@@ -6,6 +6,32 @@ namespace CipherChat.Tests;
 
 public class MessageRulesTests
 {
+    [Theory]
+    [InlineData("a", true)]
+    [InlineData("Anna", true)]
+    [InlineData("A_b.c-9", true)]
+    [InlineData("aaaaaaaaaaaaaaaaaaaa", true)]     // 20
+    [InlineData("aaaaaaaaaaaaaaaaaaaaa", false)]   // 21
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    [InlineData("a b", false)]
+    [InlineData(" a", false)]
+    [InlineData("a:b", false)]
+    [InlineData("a*b", false)]
+    [InlineData("jos\u00e9", false)]
+    [InlineData("a\u001bb", false)]
+    [InlineData("a\u202eb", false)]
+    [InlineData("you", false)]
+    [InlineData("YOU", false)]
+    [InlineData("You", false)]
+    [InlineData("young", true)]
+    [InlineData("them", true)]
+    public void ValidateHandle(string handle, bool valid)
+    {
+        Assert.Equal(valid, MessageRules.ValidateHandle(handle) == null);
+        if (!valid) Assert.False(string.IsNullOrEmpty(MessageRules.ValidateHandle(handle)));   // always a plain message
+    }
+
     [Fact]
     public void Sanitizer_StripsControlChars_KeepsUnicode()
     {

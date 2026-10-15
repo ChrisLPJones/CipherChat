@@ -70,9 +70,9 @@ public class MaliciousServerTests : IDisposable
         return rig;
     }
 
-    private async Task<Rig> Chatting(int clientRole = 1)
+    private async Task<Rig> Chatting(int clientRole = 1, string handle = null)
     {
-        Rig r = await Start();
+        Rig r = await Start(new ChatSessionOptions { RidOverride = "aabbcc", Handle = handle });
         r.Pair(clientRole);
         r.CompleteHandshake();
         Wait.For(() => r.S.State == SessionState.Chatting, "chatting");
@@ -235,7 +235,7 @@ public class MaliciousServerTests : IDisposable
     }
 
     [Theory]
-    [InlineData("ERR timeout", EndReason.NobodyJoined)]
+    [InlineData("ERR timeout", EndReason.ConnectionLost)]
     [InlineData("ERR full", EndReason.ServerBusy)]
     [InlineData("ERR rate", EndReason.ServerBusy)]
     [InlineData("ERR version", EndReason.VersionMismatch)]
@@ -253,11 +253,26 @@ public class MaliciousServerTests : IDisposable
     // ---- silence, garbage ----
 
     [Fact]
-    public async Task SilentServer_LooksLikeNobodyJoined()
+    public async Task SilentServerWhileAlone_IsDetectedAsDead_ByTheKeepalive_ButQuitStillWorks()
     {
-        Rig r = await Start(new ChatSessionOptions { RidOverride = "aabbcc", AloneTimeoutMs = 400 });
-        Assert.Equal(EndReason.NobodyJoined, await r.S.Completion.WaitAsync(TimeSpan.FromSeconds(5)));
-        Assert.True(Has(r.S, "Nobody joined"));
+        Rig r = await Start(new ChatSessionOptions { RidOverride = "aabbcc", PingIntervalMs = 150 });
+        r.Srv.Intercept = l => l == "PING";            // swallow the PINGs: no PONG ever comes back
+        r.Srv.Send("WAIT");
+        Wait.For(() => r.S.State == SessionState.Waiting, "waiting");
+        Assert.Equal(EndReason.ConnectionLost, await r.S.Completion.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(r.Srv.Saw("PING"));
+    }
+
+    [Fact]
+    public async Task ServerThatAnswersPings_KeepsAWaitingClientWaiting_WithNoClientSideLimit()
+    {
+        Rig r = await Start(new ChatSessionOptions { RidOverride = "aabbcc", PingIntervalMs = 100 });
+        r.Srv.Send("WAIT");
+        Wait.For(() => r.S.State == SessionState.Waiting, "waiting");
+        Wait.Never(() => r.S.IsEnded, "waiting client gave up", 1500);
+        Assert.True(r.Srv.Received.Count(l => l == "PING") >= 5);
+        r.S.Quit();
+        Assert.Equal(EndReason.UserQuit, await r.S.Completion);
     }
 
     [Fact]
@@ -387,6 +402,100 @@ public class MaliciousServerTests : IDisposable
         Thread.Sleep(200);
         Assert.Equal(sent, r.Srv.Received.Count);
         Assert.Equal(EndReason.UserQuit, await r.S.Completion);
+    }
+
+    // ---- handles (untrusted display names, inside the encrypted session only) ----
+
+    [Fact]
+    public async Task OurHandle_IsTheFirstEncryptedMessage_AndNeverOnTheWireInTheClear()
+    {
+        Rig r = await Chatting(handle: "Anna_Smith");
+        string first = r.Srv.Wait(l => l.StartsWith("MSG "));
+        OpenResult res = r.FakeChannel.Open(ClientFrame.DecodeBlob(first.Split(' ')[1]));
+        Assert.Equal((OpenStatus.Ok, MessageKind.Handle, "Anna_Smith"), (res.Status, res.Kind, res.Text));
+
+        // nothing sent before the session was established mentions the handle in any encoding
+        string[] beforeSession = r.Srv.Received.TakeWhile(l => !l.StartsWith("MSG ")).ToArray();
+        Assert.All(beforeSession, l => Assert.Contains(l.Split(' ')[0], new[] { "HELLO", "KEY", "CONFIRM", "PING" }));
+        r.S.Send("hello");
+        r.S.Quit();
+        Thread.Sleep(200);
+        string all = string.Join("\n", r.Srv.Received);
+        foreach (string h in new[] { "Anna_Smith", Convert.ToBase64String(Encoding.ASCII.GetBytes("Anna_Smith")), Convert.ToHexString(Encoding.ASCII.GetBytes("Anna_Smith")) })
+            Assert.DoesNotContain(h, all, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Anna", all);
+    }
+
+    [Fact]
+    public async Task ValidPeerHandle_IsShown_BeforeTheFirstText()
+    {
+        Rig r = await Chatting(handle: "me");
+        r.Srv.Send(MsgLine(r.FakeChannel.SealHandle("Peer.One")));
+        r.Srv.Send(MsgLine(r.FakeChannel.SealText("hey")));
+        Wait.For(() => Has(r.S, "Peer.One: hey"), "labelled line");
+        Assert.True(Has(r.S, "Peer.One is in the chat."));
+        r.Srv.Send(MsgLine(r.FakeChannel.SealEnd()));
+        Assert.Equal(EndReason.PeerLeft, await r.S.Completion.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(Has(r.S, "Peer.One left the chat."));
+    }
+
+    [Theory]
+    [InlineData("bad!name")]        // '!' is outside [A-Za-z0-9_.-]
+    [InlineData("a*b")]             // would look like a status line
+    [InlineData("you")]             // would impersonate our own lines
+    [InlineData("YOU")]
+    [InlineData("me")]              // equal to our own handle
+    [InlineData("ME")]
+    public async Task InvalidOrDuplicateHandle_FallsBackToTheNeutralLabel_AndTheChatContinues(string handle)
+    {
+        Rig r = await Chatting(handle: "me");
+        r.Srv.Send(MsgLine(r.FakeChannel.SealHandle(handle)));
+        r.Srv.Send(MsgLine(r.FakeChannel.SealText("hello")));
+        Wait.For(() => Has(r.S, "Them: hello"), "neutral label");
+        Assert.DoesNotContain(r.S.SnapshotLines(), l => l.Contains("is in the chat"));
+        Assert.Equal(SessionState.Chatting, r.S.State);
+    }
+
+    [Fact]
+    public async Task RepeatedOrLateHandle_IsIgnored()
+    {
+        // repeat: the second handle never replaces the first
+        Rig r = await Chatting();
+        r.Srv.Send(MsgLine(r.FakeChannel.SealHandle("First")));
+        r.Srv.Send(MsgLine(r.FakeChannel.SealHandle("Second")));
+        r.Srv.Send(MsgLine(r.FakeChannel.SealText("x")));
+        Wait.For(() => Has(r.S, "First: x"), "first handle kept");
+        Assert.DoesNotContain(r.S.SnapshotLines(), l => l.Contains("Second"));
+
+        // late: a handle after a text message is ignored
+        Rig l = await Chatting();
+        l.Srv.Send(MsgLine(l.FakeChannel.SealText("before")));
+        l.Srv.Send(MsgLine(l.FakeChannel.SealHandle("Late")));
+        l.Srv.Send(MsgLine(l.FakeChannel.SealText("after")));
+        Wait.For(() => Has(l.S, "Them: after"), "neutral label stays");
+        Assert.DoesNotContain(l.S.SnapshotLines(), x => x.Contains("Late"));
+    }
+
+    [Fact]
+    public async Task OversizedOrMalformedHandleMessage_EndsTheChat()
+    {
+        Rig r = await Chatting();
+        r.Srv.Send(MsgLine(r.FakeChannel.SealForTest(MessageKind.Handle, Encoding.ASCII.GetBytes(new string('a', 21)))));
+        Assert.Equal(EndReason.MessageFailed, await r.S.Completion.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Rig e = await Chatting();
+        e.Srv.Send(MsgLine(e.FakeChannel.SealForTest(MessageKind.Handle, Array.Empty<byte>())));
+        Assert.Equal(EndReason.MessageFailed, await e.S.Completion.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public async Task HandleControlCharacters_NeverReachTheScreen()
+    {
+        Rig r = await Chatting();
+        r.Srv.Send(MsgLine(r.FakeChannel.SealForTest(MessageKind.Handle, Encoding.ASCII.GetBytes("a\u001b[2Jb"))));
+        r.Srv.Send(MsgLine(r.FakeChannel.SealText("x")));
+        Wait.For(() => Has(r.S, "Them: x"), "neutral label");
+        Assert.DoesNotContain(r.S.SnapshotLines(), l => l.Contains('\u001b'));
     }
 
     // ---- wire hygiene ----

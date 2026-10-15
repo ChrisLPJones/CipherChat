@@ -19,10 +19,10 @@ class Program
         }
         Console.CancelKeyPress += (s, e) => { e.Cancel = true; session?.Quit(); };
 
-        string code = PromptCode();
-        if (code == null) return 0;
+        var entry = PromptEntry();
+        if (entry == null) return 0;
 
-        session = new ChatSession(host, port, code);
+        session = new ChatSession(host, port, entry.Value.Code, new ChatSessionOptions { Handle = entry.Value.Handle });
         session.LineAdded += _ => Redraw();
         session.StateChanged += _ => Redraw();
         Console.Clear();
@@ -58,30 +58,35 @@ class Program
 
     // ---- code entry ----
 
-    private static string PromptCode()
+    // Handle (shown to the other person), then the secret key twice (masked). Null if Esc is pressed.
+    private static (string Handle, string Code)? PromptEntry()
     {
         Console.Clear();
-        Console.WriteLine("CipherChat - private chat for two people");
-        Console.WriteLine();
-        Console.WriteLine("Make up 4 or more random words together (not a quote, a name or a song line).");
-        Console.WriteLine("Anyone who guesses the code can read the chat.");
+        string handle;
         while (true)
         {
-            Console.WriteLine();
-            string first = ReadMasked("Code you agreed on (hidden): ");
+            handle = ReadEntry("Enter handle: ", echo: true);
+            if (handle == null) return null;
+            string problem = MessageRules.ValidateHandle(handle);
+            if (problem == null) break;
+            Console.WriteLine(problem);
+        }
+        while (true)
+        {
+            string first = ReadEntry("Secret key: ", echo: false);
             if (first == null) return null;
             string problem = PairCode.Validate(PairCode.Normalize(first));
             if (problem != null) { Console.WriteLine(problem); continue; }
-            string second = ReadMasked("Type it again: ");
+            string second = ReadEntry("Type it again: ", echo: false);
             if (second == null) return null;
             problem = PairCode.CheckEntry(first, second, out string normalized);
-            if (problem == null) return normalized;
+            if (problem == null) return (handle, normalized);
             Console.WriteLine(problem);
         }
     }
 
-    // Reads a line without echoing it (shows '*'). Returns null if Esc is pressed.
-    private static string ReadMasked(string prompt)
+    // Reads a line; echo = false shows '*' instead of the characters. Returns null if Esc is pressed.
+    private static string ReadEntry(string prompt, bool echo)
     {
         Console.Write(prompt);
         StringBuilder sb = new();
@@ -91,7 +96,11 @@ class Program
             if (k.Key == ConsoleKey.Enter) { Console.WriteLine(); return sb.ToString(); }
             if (k.Key == ConsoleKey.Escape) { Console.WriteLine(); return null; }
             if (k.Key == ConsoleKey.Backspace) { if (sb.Length > 0) { sb.Length--; Console.Write("\b \b"); } continue; }
-            if (!char.IsControl(k.KeyChar) && sb.Length < ProtocolLimits.MaxCodeChars + 20) { sb.Append(k.KeyChar); Console.Write('*'); }
+            if (!char.IsControl(k.KeyChar) && sb.Length < ProtocolLimits.MaxCodeChars + 20)
+            {
+                sb.Append(k.KeyChar);
+                Console.Write(echo ? k.KeyChar : '*');
+            }
         }
     }
 

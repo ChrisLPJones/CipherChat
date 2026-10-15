@@ -409,17 +409,49 @@ public class ServerIntegrationTests : IDisposable
     }
 
     [Fact]
-    public void AloneTimeout_EndsTheWait_AndFreesTheRid()
+    public void LoneWaiter_HasNoTimeLimit_StaysWaitingPastTheOldTenMinutes_AndKeepaliveHoldsIt()
     {
-        var s = Start(new ServerLimits { MaxConnectionsPerIp = 100, HellosPerIpPerMinute = 1000, AloneTimeoutMs = 300 });
+        var s = Start(new ServerLimits { MaxConnectionsPerIp = 100, HellosPerIpPerMinute = 1000, ReadTimeoutMs = 700, HelloDeadlineMs = 300 });
         var a = Join(s, "0b0b0b", 'a', out string w);
         using (a)
         {
             Assert.Equal("WAIT", w);
+            // Longer than the hello deadline and the read timeout, kept alive by PINGs (well within the 4/min refill: the clock is faked).
+            for (int i = 0; i < 8; i++)
+            {
+                Thread.Sleep(250);
+                Advance(15_000);                         // 2 minutes of fake time in total on top of the real time
+                Barrier(a);
+            }
+            Advance(11 * 60_000);                       // far past the old 10 minute limit
+            Barrier(a);
+            Assert.Equal(1, s.WaiterCount);
+            // and it can still be paired
+            using var b = Join(s, "0b0b0b", 'b', out string p);
+            Assert.Equal($"PAIRED 2 {Nonce('a')}", p);
+            Assert.Equal($"PAIRED 1 {Nonce('b')}", a.ReadLine());
+        }
+    }
+
+    [Fact]
+    public void DeadWaiter_IsDropped_AndItsSlotAndRidAreFreed()
+    {
+        // silent but connected: the read timeout ends it
+        var s = Start(new ServerLimits { MaxConnectionsPerIp = 100, HellosPerIpPerMinute = 1000, ReadTimeoutMs = 400 });
+        var a = Join(s, "0b0b0b", 'a', out _);
+        using (a)
+        {
             Assert.Equal("ERR timeout", a.ReadLine());
             Assert.Null(a.ReadLine());
         }
-        Wait.For(() => s.WaiterCount == 0, "rid freed");
+        Wait.For(() => s.WaiterCount == 0 && s.ConnectionCount == 0, "slot freed");
+        using var b = Join(s, "0b0b0b", 'b', out string reply);
+        Assert.Equal("WAIT", reply);
+
+        // vanished without a word: the connection closing frees it at once
+        var c = Join(s, "0c0c0c", 'c', out _);
+        c.Dispose();
+        Wait.For(() => s.WaiterCount == 1, "closed waiter freed");
     }
 
     [Fact]

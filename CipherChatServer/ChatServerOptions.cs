@@ -9,9 +9,8 @@ public sealed class ServerLimits
 
     // Deadlines (real time)
     public int HelloDeadlineMs { get; init; } = 10_000;        // from connect to a valid HELLO
-    public int AloneTimeoutMs { get; init; } = 10 * 60_000;    // waiting alone
     public int ConfirmDeadlineMs { get; init; } = 30_000;      // both CONFIRMs after PAIRED
-    public int ReadTimeoutMs { get; init; } = 90_000;          // no line at all (clients PING every 30 s)
+    public int ReadTimeoutMs { get; init; } = 90_000;          // no line at all (clients PING every 30 s, also while waiting alone)
 
     // Pairing and abuse controls (clock-based, so tests use a fake clock)
     public long BurnMs { get; init; } = 60L * 60_000;          // a rid is burned this long after one pairing

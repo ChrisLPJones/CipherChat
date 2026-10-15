@@ -6,7 +6,7 @@ namespace CipherChatClient;
 
 // Every status except Ok means the message was rejected and the chat should end (strict order, no gaps).
 public enum OpenStatus { Ok, Malformed, UnknownSession, Replay, OutOfOrder, AuthFailed, BadPlaintext, Exhausted }
-public enum MessageKind : byte { Text = 0x01, EndOfSession = 0x02 }
+public enum MessageKind : byte { Text = 0x01, EndOfSession = 0x02, Handle = 0x03 }
 
 public sealed class OpenResult
 {
@@ -67,6 +67,17 @@ public sealed class SecureChannel : IDisposable
         if (utf8.Length > ProtocolLimits.MaxTextBytes) throw new ArgumentException("The message is too long.");
         return Seal(MessageKind.Text, utf8);
     }
+
+    // The sender's display name (1-20 ASCII characters), sent once as the first message of a session.
+    public byte[] SealHandle(string handle)
+    {
+        if (handle == null || handle.Length < 1 || handle.Length > ProtocolLimits.MaxHandleChars || handle.Any(c => c > 0x7E || c < 0x21))
+            throw new ArgumentException("Invalid handle.");
+        return Seal(MessageKind.Handle, Encoding.ASCII.GetBytes(handle));
+    }
+
+    // Test hook: seals an arbitrary kind and payload with the normal framing (to test the receiver's strictness).
+    internal byte[] SealForTest(MessageKind kind, byte[] payload) => Seal(kind, payload);
 
     public byte[] SealEnd() => Seal(MessageKind.EndOfSession, Array.Empty<byte>());
 
@@ -168,14 +179,15 @@ public sealed class SecureChannel : IDisposable
     {
         MessageKind kind = (MessageKind)pt[0];
         int len = BinaryPrimitives.ReadUInt16BigEndian(pt.AsSpan(1, 2));
-        if ((kind != MessageKind.Text && kind != MessageKind.EndOfSession) || len > ProtocolLimits.MaxTextBytes
+        if ((kind != MessageKind.Text && kind != MessageKind.EndOfSession && kind != MessageKind.Handle) || len > ProtocolLimits.MaxTextBytes
             || 3 + len > pt.Length || (kind == MessageKind.EndOfSession && len != 0)
+            || (kind == MessageKind.Handle && (len < 1 || len > ProtocolLimits.MaxHandleChars))
             || pt.Length != PaddedLength(len))
             return Fail(OpenStatus.BadPlaintext);
         for (int i = 3 + len; i < pt.Length; i++)
             if (pt[i] != 0) return Fail(OpenStatus.BadPlaintext);
         string text = "";
-        if (kind == MessageKind.Text)
+        if (kind != MessageKind.EndOfSession)
         {
             try { text = new UTF8Encoding(false, true).GetString(pt, 3, len); }
             catch (ArgumentException) { return Fail(OpenStatus.BadPlaintext); }

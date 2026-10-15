@@ -286,6 +286,41 @@ public class SecureChannelTests
     }
 
     [Fact]
+    public void Handle_RoundTrips_AsAOneBlockMessage()
+    {
+        var (a, b) = Pair();
+        byte[] m = a.SealHandle("Anna_1.x-y");
+        Assert.Equal(26 + 256 + 16, m.Length);
+        OpenResult r = b.Open(m);
+        Assert.Equal((OpenStatus.Ok, MessageKind.Handle, "Anna_1.x-y"), (r.Status, r.Kind, r.Text));
+        Assert.Equal("text after", b.Open(a.SealText("text after")).Text);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(null)]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaa")]    // 21
+    [InlineData("a b")]
+    [InlineData("caf\u00e9")]
+    public void SealHandle_RejectsBadHandles(string handle)
+    {
+        var (a, _) = Pair();
+        Assert.Throws<ArgumentException>(() => a.SealHandle(handle));
+    }
+
+    [Fact]
+    public void Handle_StrictParsing_OnTheReceivingSide()
+    {
+        // oversized (21 bytes), empty, and a handle that is not valid UTF-8 are protocol violations
+        var (a, b) = Pair();
+        Assert.Equal(OpenStatus.BadPlaintext, b.Open(a.SealForTest(MessageKind.Handle, new byte[21].Select(_ => (byte)'a').ToArray())).Status);
+        Assert.Equal(OpenStatus.BadPlaintext, b.Open(a.SealForTest(MessageKind.Handle, Array.Empty<byte>())).Status);
+        Assert.Equal(OpenStatus.BadPlaintext, b.Open(a.SealForTest(MessageKind.Handle, new byte[] { 0xFF, 0xFE })).Status);
+        // exactly 20 bytes is fine
+        Assert.Equal(OpenStatus.Ok, b.Open(a.SealForTest(MessageKind.Handle, new byte[20].Select(_ => (byte)'a').ToArray())).Status);
+    }
+
+    [Fact]
     public void Directions_UseDifferentKeys()
     {
         var (a, b) = Pair();

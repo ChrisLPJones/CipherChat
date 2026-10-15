@@ -9,6 +9,7 @@ public static class ProtocolLimits
 {
     // Wire protocol v5 (paired-code chat).
     public const int MaxMessageChars = 2000;
+    public const int MaxHandleChars = 20;   // display name, sent only inside the encrypted session
     public const int MaxTextBytes = 6000;   // 2000 characters of up to 3 UTF-8 bytes
     public const int PadBlock = 256;
     // Longest line: "MSG " + 8248 = 8252; the limit leaves some room and bounds every read.

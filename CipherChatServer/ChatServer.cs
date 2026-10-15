@@ -45,6 +45,7 @@ public class ChatServer : IDisposable
         public string Rid;
         public bool Productive;               // at least one MSG was relayed
         public bool Ended;
+        public bool Quiet;                    // both sides were told ERR timeout: no GONE on top
         public CancellationTokenSource ConfirmTimer = new();
         public Connection Other(Connection c) => c == A ? B : A;
     }
@@ -227,7 +228,7 @@ public class ChatServer : IDisposable
 
         if (pair == null)
         {
-            conn.Arm(limits.AloneTimeoutMs, () => conn.Stage == Stage.Waiting);
+            conn.Disarm();   // waiting alone has no time limit; the read timeout (keepalive PINGs) detects dead connections
             conn.Send(ServerFrame.Wait);
             return true;
         }
@@ -247,6 +248,7 @@ public class ChatServer : IDisposable
         _ = Task.Delay(limits.ConfirmDeadlineMs, pair.ConfirmTimer.Token).ContinueWith(t =>
         {
             if (t.IsCanceled || pair.Ended || (pair.A.ConfirmSeen && pair.B.ConfirmSeen)) return;
+            lock (sync) pair.Quiet = true;
             pair.A.Send(ServerFrame.Err("timeout"));
             pair.B.Send(ServerFrame.Err("timeout"));
             pair.A.Close();
@@ -295,6 +297,7 @@ public class ChatServer : IDisposable
     private void Cleanup(Connection conn)
     {
         Connection peerToDrop = null;
+        bool quiet = false;
         lock (sync)
         {
             if (clients.Remove(conn) && conn.Counted && perIp.TryGetValue(conn.Ip, out int n))
@@ -318,12 +321,13 @@ public class ChatServer : IDisposable
                         LimiterFor(failLimiters, ip, limits.UnproductivePairingsPerIpPerHour, limits.UnproductivePairingsPerIpPerHour / 3600.0).Charge();
                 }
                 peerToDrop = pair.Other(conn);
+                quiet = pair.Quiet;
                 try { pair.ConfirmTimer.Cancel(); } catch (ObjectDisposedException) { }
             }
         }
         if (peerToDrop != null)
         {
-            peerToDrop.Send(ServerFrame.Gone);
+            if (!quiet) peerToDrop.Send(ServerFrame.Gone);
             peerToDrop.Close();
         }
         conn.Disarm();

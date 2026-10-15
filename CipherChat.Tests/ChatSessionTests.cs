@@ -62,6 +62,7 @@ public class ChatSessionTests : IDisposable
         Wait.For(() => Has(a, "Them: hello a"), "a receives");
         Assert.True(Has(a, "You: hello b"));
         Assert.True(Has(a, "Secure session established."));
+        Assert.DoesNotContain(a.SnapshotLines(), l => l.Contains("proved"));
     }
 
     [Fact]
@@ -107,19 +108,20 @@ public class ChatSessionTests : IDisposable
     }
 
     [Fact]
-    public async Task DifferentCodes_GiveDifferentRids_AndNeverPair_LookLikeNobodyJoined()
+    public async Task DifferentCodes_GiveDifferentRids_AndNeverPair_BothJustKeepWaiting()
     {
         Server();
-        var o = new ChatSessionOptions { AloneTimeoutMs = 1500 };
-        var a = NewSession(Code, o: o);
-        var b = NewSession(OtherCode, o: new ChatSessionOptions { AloneTimeoutMs = 1500 });
+        var a = NewSession(Code, o: new ChatSessionOptions());
+        var b = NewSession(OtherCode, o: new ChatSessionOptions());
         await Task.WhenAll(a.StartAsync(), b.StartAsync());
         Wait.For(() => a.State == SessionState.Waiting && b.State == SessionState.Waiting, "both waiting");
         Assert.Equal(2, server.WaiterCount);
-        Assert.Equal(EndReason.NobodyJoined, await a.Completion.WaitAsync(TimeSpan.FromSeconds(8)));
-        Assert.Equal(EndReason.NobodyJoined, await b.Completion.WaitAsync(TimeSpan.FromSeconds(8)));
-        Assert.True(Has(a, "Nobody joined with this code"));
-        Assert.DoesNotContain(a.SnapshotLines(), l => l.Contains("securely"));
+        Wait.Never(() => a.IsEnded || b.IsEnded || a.State == SessionState.Handshaking, "a wrong code ended or paired", 1500);
+        Assert.True(Has(a, "Waiting for the other person..."));
+        Assert.DoesNotContain(a.SnapshotLines(), l => l.Contains("securely") || l.Contains("minutes"));
+        a.Quit(); b.Quit();                                   // Esc / quit still works while waiting
+        Assert.Equal(EndReason.UserQuit, await a.Completion);
+        Wait.For(() => server.WaiterCount == 0, "slots freed");
     }
 
     [Fact]
@@ -247,7 +249,9 @@ public class ChatSessionTests : IDisposable
     [Fact]
     public void Describe_HasTheMessagesFromThePlan()
     {
-        Assert.Equal("Nobody joined with this code within 10 minutes. Check that you both typed exactly the same code.", ChatSession.Describe(EndReason.NobodyJoined));
+        Assert.Equal("The other person left the chat.", ChatSession.Describe(EndReason.PeerLeft));
+        Assert.Equal("anna left the chat.", ChatSession.Describe(EndReason.PeerLeft, "anna"));
+        Assert.Equal("anna disconnected.", ChatSession.Describe(EndReason.PeerDisconnected, "anna"));
         Assert.StartsWith("Could not connect securely. Someone else may have used your code, or the connection was tampered with. Make up a NEW code together before trying again.", ChatSession.Describe(EndReason.SecurityFailure));
         Assert.Equal("A message failed verification. The chat was ended for safety.", ChatSession.Describe(EndReason.MessageFailed));
         Assert.True(ChatSession.IsFailure(EndReason.SecurityFailure));

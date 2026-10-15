@@ -9,16 +9,18 @@ public enum SessionState { Idle, Preparing, Connecting, Waiting, Handshaking, Ch
 
 public enum EndReason
 {
-    None, UserQuit, NobodyJoined, SecurityFailure, ServerBusy, VersionMismatch, CannotConnect, ConnectionLost,
+    None, UserQuit, SecurityFailure, ServerBusy, VersionMismatch, CannotConnect, ConnectionLost,
     MessageFailed, PeerLeft, PeerDisconnected, SessionLimit, NotEnoughMemory, CryptoUnavailable,
 }
 
 public sealed class ChatSessionOptions
 {
     public int ConnectTimeoutMs { get; init; } = 10_000;
-    public int AloneTimeoutMs { get; init; } = 10 * 60_000 + 10_000;  // the server ends the wait after 10 minutes
     public int HandshakeTimeoutMs { get; init; } = 35_000;            // the server's own limit is 30 s
-    public int PingIntervalMs { get; init; } = 30_000;
+    public int PingIntervalMs { get; init; } = 30_000;   // also while waiting alone; a server silent for 3 intervals is considered dead
+
+    // Display name shown to the other person; sent only inside the encrypted session (null = send none).
+    public string Handle { get; init; }
 
     // Test hook: skip the slow Argon2id derivation and use this rendezvous id.
     internal string RidOverride { get; init; }
@@ -51,6 +53,9 @@ public sealed class ChatSession : IDisposable
     private byte[] ownNonce;
     private string rid;
     private int malformed;
+    private long lastRx = Environment.TickCount64;
+    private string peerHandle;                    // validated display name of the other person, or null
+    private bool receivedAnything;                // any message accepted yet (a handle is only valid as the first)
     private SessionState state = SessionState.Idle;
 
     // The code must already be normalized (PairCode.Normalize) and valid (PairCode.Validate returns null).
@@ -62,6 +67,8 @@ public sealed class ChatSession : IDisposable
         this.port = port;
         code = normalizedCode;
         this.options = options ?? new ChatSessionOptions();
+        if (this.options.Handle != null && MessageRules.ValidateHandle(this.options.Handle) != null)
+            throw new ArgumentException("Invalid handle.");
         _ = Task.Run(DispatchEvents);
     }
 
@@ -82,17 +89,16 @@ public sealed class ChatSession : IDisposable
 
     public List<string> SnapshotLines() { lock (lines) return lines.ToList(); }
 
-    public static string Describe(EndReason reason) => reason switch
+    public static string Describe(EndReason reason, string peerLabel = null) => reason switch
     {
-        EndReason.NobodyJoined => "Nobody joined with this code within 10 minutes. Check that you both typed exactly the same code.",
         EndReason.SecurityFailure => "Could not connect securely. Someone else may have used your code, or the connection was tampered with. Make up a NEW code together before trying again.",
         EndReason.ServerBusy => "Server busy, try again shortly.",
         EndReason.VersionMismatch => "The server does not speak this version of the protocol: upgrade the server and the clients together.",
         EndReason.CannotConnect => "Could not connect to the server.",
         EndReason.ConnectionLost => "The connection to the server was lost.",
         EndReason.MessageFailed => "A message failed verification. The chat was ended for safety.",
-        EndReason.PeerLeft => "The other person left the chat.",
-        EndReason.PeerDisconnected => "The other person disconnected.",
+        EndReason.PeerLeft => $"{peerLabel ?? "The other person"} left the chat.",
+        EndReason.PeerDisconnected => $"{peerLabel ?? "The other person"} disconnected.",
         EndReason.SessionLimit => "This chat reached its message limit and was ended.",
         EndReason.NotEnoughMemory => "Not enough free memory to prepare the code (about 256 MiB are needed).",
         EndReason.CryptoUnavailable => "The cryptography library could not be loaded on this computer.",
@@ -109,7 +115,7 @@ public sealed class ChatSession : IDisposable
     public async Task StartAsync()
     {
         SetState(SessionState.Preparing);
-        AddLine("* Preparing...");
+        AddLine("* Checking the code...");
         try
         {
             rid = options.RidOverride ?? await Task.Run(() => PairCode.DeriveRid(code));
@@ -125,6 +131,7 @@ public sealed class ChatSession : IDisposable
             stream = tcp.GetStream();
             reader = new StreamReader(stream, Encoding.ASCII);
             ownNonce = RandomNumberGenerator.GetBytes(CPace.NonceBytes);
+            lastRx = Environment.TickCount64;
             WriteLine(ClientFrame.Hello(rid, Convert.ToHexString(ownNonce).ToLowerInvariant()));
         }
         catch (Exception ex) when (ex is SocketException or IOException or TimeoutException or ObjectDisposedException)
@@ -136,7 +143,6 @@ public sealed class ChatSession : IDisposable
 
         _ = Task.Run(ReceiveLoop);
         _ = Task.Run(PingLoop);
-        StartTimer(options.AloneTimeoutMs, () => state is SessionState.Connecting or SessionState.Waiting, EndReason.NobodyJoined);
     }
 
     // ---- sending ----
@@ -188,6 +194,7 @@ public sealed class ChatSession : IDisposable
             {
                 string line = await ProtocolLimits.ReadBoundedLineAsync(reader, ProtocolLimits.MaxLineChars);
                 if (line == null) break;
+                Interlocked.Exchange(ref lastRx, Environment.TickCount64);
                 if (!ClientFrame.TryParse(line, out ServerEvent ev))
                 {
                     // Garbage cannot change any state; a server that sends nothing else is just broken.
@@ -244,7 +251,8 @@ public sealed class ChatSession : IDisposable
                 if (state == SessionState.Connecting)
                 {
                     SetState(SessionState.Waiting);
-                    AddLine("* Waiting for the other person (up to 10 minutes)...");
+                    AddLine("* Waiting for the other person...");
+                    AddLine("* Both of you must type exactly the same secret key. Esc cancels.");
                 }
                 break;
             case ServerEventKind.Paired:
@@ -253,7 +261,7 @@ public sealed class ChatSession : IDisposable
             case ServerEventKind.Err:
                 EndLocked(ev.Data switch
                 {
-                    "timeout" => EndReason.NobodyJoined,
+                    "timeout" => EndReason.ConnectionLost,
                     "full" or "rate" => EndReason.ServerBusy,
                     "version" => EndReason.VersionMismatch,
                     _ => EndReason.SecurityFailure,          // "used": the code was already taken by someone else
@@ -275,7 +283,7 @@ public sealed class ChatSession : IDisposable
             cpace = new CPace(ev.Role, code, rid, ownNonce, peerNonce);
             byte[] y = cpace.CreateKeyMessage();
             SetState(SessionState.Handshaking);
-            AddLine("* Connected. Checking the code...");
+            AddLine("* Other person found. Verifying...");
             WriteLine(ClientFrame.Key(y));
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException)
@@ -304,6 +312,7 @@ public sealed class ChatSession : IDisposable
                     cpace = null;
                     SetState(SessionState.Chatting);
                     AddLine("* Secure session established.");
+                    if (options.Handle != null) WriteLine(ClientFrame.Msg(channel.SealHandle(options.Handle)));
                     break;
                 default:
                     // MSG before the handshake finished, GONE, ERR, a second PAIRED/WAIT: all the same failure.
@@ -321,6 +330,21 @@ public sealed class ChatSession : IDisposable
         }
     }
 
+    private string PeerLabel => peerHandle ?? MessageRules.NeutralPeerLabel;
+
+    // The handle is untrusted: it counts only as the very first message, once, and only if it passes the same rules
+    // as our own and is neither "you" nor our own handle. Anything else is ignored and the neutral label stays.
+    private void AcceptHandle(string handle)
+    {
+        bool first = !receivedAnything;
+        receivedAnything = true;
+        if (!first || peerHandle != null) return;
+        if (MessageRules.ValidateHandle(handle) != null) return;
+        if (options.Handle != null && handle.Equals(options.Handle, StringComparison.OrdinalIgnoreCase)) return;
+        peerHandle = handle;
+        AddLine($"* {handle} is in the chat.");
+    }
+
     private void HandleChat(ServerEvent ev)
     {
         switch (ev.Kind)
@@ -330,7 +354,12 @@ public sealed class ChatSession : IDisposable
                 OpenResult r = blob == null ? new OpenResult { Status = OpenStatus.Malformed } : channel.Open(blob);
                 if (r.Status != OpenStatus.Ok) { EndLocked(r.Status == OpenStatus.Exhausted ? EndReason.SessionLimit : EndReason.MessageFailed); return; }
                 if (r.Kind == MessageKind.EndOfSession) EndLocked(EndReason.PeerLeft);
-                else AddLine("Them: " + MessageRules.SanitizeForDisplay(r.Text));
+                else if (r.Kind == MessageKind.Handle) AcceptHandle(r.Text);
+                else
+                {
+                    receivedAnything = true;
+                    AddLine(PeerLabel + ": " + MessageRules.SanitizeForDisplay(r.Text));
+                }
                 break;
             case ServerEventKind.Gone:
                 EndLocked(EndReason.PeerDisconnected);
@@ -361,7 +390,7 @@ public sealed class ChatSession : IDisposable
         cpace?.Dispose(); cpace = null;
         channel?.Dispose(); channel = null;
         try { tcp.Close(); } catch (Exception) { }
-        string text = Describe(reason);
+        string text = Describe(reason, peerHandle);
         if (text.Length > 0) AddLine("* " + text);
         Raise(() => StateChanged?.Invoke(SessionState.Ended));
         Raise(() => Ended?.Invoke(reason));
@@ -390,6 +419,7 @@ public sealed class ChatSession : IDisposable
             while (!IsEnded)
             {
                 await Task.Delay(options.PingIntervalMs, cts.Token);
+                if (Environment.TickCount64 - Interlocked.Read(ref lastRx) > 3L * options.PingIntervalMs) { End(EndReason.ConnectionLost); return; }
                 WriteLine(ClientFrame.Ping());
             }
         }
