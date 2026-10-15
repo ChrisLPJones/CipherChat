@@ -58,7 +58,7 @@ class Program
 
     // ---- code entry ----
 
-    // Handle (shown to the other person), then the secret key twice (masked). Null if Esc is pressed.
+    // Handle (shown to the other user), then the secret key twice (masked). Null if Esc is pressed.
     private static (string Handle, string Code)? PromptEntry()
     {
         Console.Clear();

@@ -5,7 +5,7 @@ using Xunit;
 
 namespace CipherChat.Tests;
 
-// A scripted server (ScriptedServer) misbehaves against a ChatSession. It also plays the other person with the
+// A scripted server (ScriptedServer) misbehaves against a ChatSession. It also plays the other user with the
 // library's own CPace/SecureChannel, so the session sees a fully valid counterpart whenever the test wants one.
 public class MaliciousServerTests : IDisposable
 {

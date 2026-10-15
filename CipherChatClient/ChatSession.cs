@@ -19,7 +19,7 @@ public sealed class ChatSessionOptions
     public int HandshakeTimeoutMs { get; init; } = 35_000;            // the server's own limit is 30 s
     public int PingIntervalMs { get; init; } = 30_000;   // also while waiting alone; a server silent for 3 intervals is considered dead
 
-    // Display name shown to the other person; sent only inside the encrypted session (null = send none).
+    // Display name shown to the other user; sent only inside the encrypted session (null = send none).
     public string Handle { get; init; }
 
     // Test hook: skip the slow Argon2id derivation and use this rendezvous id.
@@ -27,7 +27,7 @@ public sealed class ChatSessionOptions
 }
 
 // One paired-code chat over one connection (wire protocol v5): derive the rendezvous id, HELLO, wait for the other
-// person, run CPace over the relay (KEY, CONFIRM), then talk over a SecureChannel. There is no resume: when the
+// user, run CPace over the relay (KEY, CONFIRM), then talk over a SecureChannel. There is no resume: when the
 // session ends the object is finished and the program is expected to exit.
 //
 // UI-agnostic. Events are raised on a dispatcher thread, never while the session's lock is held.
@@ -54,7 +54,7 @@ public sealed class ChatSession : IDisposable
     private string rid;
     private int malformed;
     private long lastRx = Environment.TickCount64;
-    private string peerHandle;                    // validated display name of the other person, or null
+    private string peerHandle;                    // validated display name of the other user, or null
     private bool receivedAnything;                // any message accepted yet (a handle is only valid as the first)
     private SessionState state = SessionState.Idle;
 
@@ -97,8 +97,8 @@ public sealed class ChatSession : IDisposable
         EndReason.CannotConnect => "Could not connect to the server.",
         EndReason.ConnectionLost => "The connection to the server was lost.",
         EndReason.MessageFailed => "A message failed verification. The chat was ended for safety.",
-        EndReason.PeerLeft => $"{peerLabel ?? "The other person"} left the chat.",
-        EndReason.PeerDisconnected => $"{peerLabel ?? "The other person"} disconnected.",
+        EndReason.PeerLeft => $"{peerLabel ?? "The other user"} left the chat.",
+        EndReason.PeerDisconnected => $"{peerLabel ?? "The other user"} disconnected.",
         EndReason.SessionLimit => "This chat reached its message limit and was ended.",
         EndReason.NotEnoughMemory => "Not enough free memory to prepare the code (about 256 MiB are needed).",
         EndReason.CryptoUnavailable => "The cryptography library could not be loaded on this computer.",
@@ -170,7 +170,7 @@ public sealed class ChatSession : IDisposable
         }
     }
 
-    // Leaves: tells the other person (encrypted end-of-session), then closes. Exit afterwards.
+    // Leaves: tells the other user (encrypted end-of-session), then closes. Exit afterwards.
     public void Quit()
     {
         lock (gate)
@@ -282,7 +282,7 @@ public sealed class ChatSession : IDisposable
             cpace = new CPace(ev.Role, code, rid, ownNonce, peerNonce);
             byte[] y = cpace.CreateKeyMessage();
             SetState(SessionState.Handshaking);
-            AddLine("* Other person found.");
+            AddLine("* Other user found.");
             AddLine("* Verifying...");
             WriteLine(ClientFrame.Key(y));
         }

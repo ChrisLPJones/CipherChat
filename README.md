@@ -1,170 +1,213 @@
 # CipherChat
 
-CipherChat is a secure and encrypted chat application implemented in C#. 
-It consists of a console-based client and server, utilizing AES-256-GCM encryption 
-for secure communication between users.
+CipherChat is a small console chat for **two users**. You make up a **secret key** together, give it to each other
+in person (or over a channel you trust), and both type it into the client. The server only pairs the two of you and
+relays bytes it cannot read. Everything you write is end-to-end encrypted, and the client exits when the chat ends.
 
-## Features
-
-- End-to-end authenticated encryption using AES-256-GCM.
-- Multi-user chat functionality with real-time message broadcasting.
-- Password-protected encryption keys.
-- All users connect using a shared pre-defined encryption key for secure communication.
-- Multiple rooms, each with its own key, plus the default `general` channel.
-- Private (direct) messages between two users with their own pair key, invisible to the rest of the chat and unreadable to the server.
+There are no accounts, rooms, user lists, history or files on disk. Written in C# (.NET 8).
 
 ## Screenshots
 
-| Login | Connected | Chat |
+| Handle and secret key | Waiting | Connected chat |
 |---|---|---|
-| ![Login](docs/screenshots/login.png) | ![Connected](docs/screenshots/connected.png) | ![Chat](docs/screenshots/chat.png) |
+| ![Handle and secret key prompts](docs/screenshots/login.png) | ![Waiting for the other connection](docs/screenshots/connected.png) | ![Connected, chatting](docs/screenshots/chat.png) |
 
 Two clients in the same conversation:
 
-![Two clients](docs/screenshots/two-clients.png)
+![Two users chatting](docs/screenshots/two-clients.png)
 
-## Getting Started
-
-Follow these instructions to set up and run CipherChat on your system.
+## Getting started
 
 ### Prerequisites
 
-- .NET SDK 6.0 or later
+- .NET 8 SDK.
+- The client uses the NuGet package `libsodium` 1.0.22 (restored automatically; prebuilt native libraries for Windows,
+  Linux, macOS and Android/iOS). The server has no dependencies.
 
-### Installation
+### Build
 
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/ChrisLPJones/CipherChat.git
-   cd CipherChat
-   ```
+```bash
+git clone https://github.com/ChrisLPJones/CipherChat.git
+cd CipherChat
+dotnet build
+```
 
-2. Build the project using the .NET CLI:
-   ```bash
-   dotnet build
-   ```
+### Run the server
 
-### Running the Server
+```bash
+cd CipherChatServer
+dotnet run -- [host] [port]        # defaults: localhost 3000; port 0-65535
+```
 
-1. Navigate to the server directory:
-   ```bash
-   cd CipherChatServer
-   ```
+The server prints one line ("Server started (protocol v5).") and logs nothing about clients.
 
-2. Run the server:
-   ```bash
-   dotnet run
-   dotnet run -- localhost 3000 /var/lib/cipherchat/history   # optional: host, port, history directory
-   ```
+### Run the client
 
-   **History (opt-in).** Pass a directory as the third argument to keep the last 1000 messages per channel on disk (created with mode 0700, files 0600). Without it nothing is stored. When a client joins a channel it fetches the retained messages it has not seen and shows them marked `[history]`; `/history` fetches them again. See the Trust model for what is and is not protected.
+Each of the two users runs, in a real terminal (the client reads single key presses, so it does not work with piped
+input; use a terminal or tmux):
 
-### Running the Client
+```bash
+cd CipherChatClient
+dotnet run -- [host port]          # defaults: localhost 3000; e.g. dotnet run -- chat.example.com 4000
+```
 
-1. Navigate to the client directory:
-   ```bash
-   cd CipherChatClient
-   ```
+Invalid arguments print a usage message and exit before any prompt.
 
-2. Run the client (optionally with the server's host and port, default `localhost 3000`; hostnames and IPs work, port 1-65535):
-   ```bash
-   dotnet run
-   dotnet run -- chat.example.com 4000
-   ```
-   Invalid arguments print a usage message and exit before any prompt.
+**Prompts**
 
-3. Enter your username and the shared encryption key to connect. You land in the `general` channel.
+```
+Enter handle: Anna
+Secret key: ****************************
+Type it again: ****************************
+```
 
-4. Commands (type them in the message line; start a message with `//` to send a literal `/`):
-   - `/join <room>`: join (or create) a room. You are asked for the **room key** (masked); everyone in the room must type the same key. A blank key reuses your login key. Room names are case-insensitive, up to 32 characters of letters, digits, `_`, `.`, `-`. A wrong key opens a different, empty room (you see "You are alone in ..."). You can be in at most 16 channels at once.
-   - `/leave [room]`: leave a room or private chat (default: the active one). The lobby `general` cannot be left.
-   - `/dm <user>`: open a private chat. You are asked for a **pair key** (masked). You and the other user must type the *same* pair key, which you agree on out of band (e.g. in person or over another secure channel). Nothing is exchanged through the server. A blank key cancels.
-   - `/switch <name|n>`, or PgUp/PgDn: change the active channel. The header row lists channels; a number in brackets is the unread count of channels you are not looking at.
-   - `/users` (members of the active channel), `/help`, `/quit` (or Esc).
-   - `/history`: re-fetch the retained messages of the active channel (only if the server runs with a history directory).
+- **Handle**: a display name for this chat, 1-20 characters from `A-Za-z0-9_.-` ("you" is reserved).
+- **Secret key**: typed masked, twice (a typo would otherwise only look like "nobody joined"). Both users must type the
+  same key; capital letters and extra spaces do not matter. Esc at any prompt exits.
 
-   A private chat only works if **both** sides ran `/dm <other user>` with the same pair key: the server cannot tell a user to open a chat, and a wrong key silently opens a different, empty channel (the client warns "You are alone in ..." when nobody else is in it).
+**Secret-key rules** (checked on your computer, with a plain message when one fails). The key is read aloud and typed, so it
+must be easy to share but hard to guess. Make up **4 or more random words** together; do not use a quote, a name or a song
+line. Anyone who guesses the key can read the chat.
+- Printable ASCII only (letters, digits, punctuation, spaces); at most 100 characters.
+- At least 12 characters and at least 6 different characters.
+- Not one repeated character and not a straight run of keys (`abcdef...`, `123456...`, `qwerty...`).
+- A key of only digits needs at least 20 digits (dates and phone numbers are easy to guess).
 
-## How It Works: Secure Communication
+**Status lines.** The first user sees:
 
-CipherChat ensures secure communication between all connected users by employing AES-256-GCM authenticated encryption. 
-Below are the detailed steps emphasizing the encryption process:
+```
+* Connecting...
+* Connected.
+* Waiting for the other connection...
+```
 
-1. **Pre-defined Encryption Key**:
-   - All users must agree on and use the same pre-defined encryption key.
-   - This key is required to encrypt and decrypt messages exchanged in the chat.
-   - Without the correct key, users cannot participate in the chat or interpret the messages.
+When the other user logs in with the same secret key:
 
-2. **Key Derivation**:
-   - CipherChat derives a 256-bit AES key from the passphrase (shared encryption key) and a randomly generated salt.
-   - This derivation is performed using PBKDF2 (Password-Based Key Derivation Function 2) with 600,000 iterations and SHA256 as the hash algorithm.
-   - The 600,000 iterations make guessing the passphrase slower, but a weak passphrase is still weak: use a long random one.
+```
+* Other user found.
+* Verifying...
+* Secure session established.
+* bob is in the chat.
+```
 
-3. **Connecting to the Server**:
-   - When a user connects, they must enter their username and the shared encryption key.
-   - The client says `HELLO 3`, derives the channel tag from the key and joins the `general` channel with its username encrypted under the key.
-   - The server only sees the opaque tag and the encrypted username, and tells the channel's members who joined.
+The second user sees the same without the waiting line. Then you chat: your lines are `You: ...` and the other user's
+lines are `<handle>: ...`. Text from the other side has control and formatting characters removed before it is shown.
 
-4. **Sending Messages**:
-   - Users type their messages in the console input line and press `Enter` to send.
-   - Before the message is sent, it is encrypted on the client-side using AES-256-GCM with the derived key and a random per-message salt and nonce.
-   - The encrypted message is sent to the server, ensuring that no sensitive information is transmitted in plaintext.
+**Leaving.** `/quit` or Esc ends the chat (the other user sees "<handle> left the chat."). A line starting with `//` sends a
+literal `/`. Any other `/word` shows a hint. When the chat ends for any reason the client shows "Press any key to exit" and
+exits (exit code 1 on a failure, 0 after a normal quit or when the other user left). There is no reconnect and nothing is
+saved: start the client again for a new chat.
 
-5. **Server Broadcasting**:
-   - The server receives the encrypted message and its channel tag from the client.
-   - Without decrypting it, the server relays the encrypted message to the other members of that channel.
-   - This ensures that the server does not have access to the actual message content, maintaining end-to-end encryption.
+**Waiting has no time limit.** If you are the first to connect you wait until the other user joins, you press Esc, or the
+connection dies (the client sends a keepalive ping every 30 seconds, and the server and the client drop dead connections).
+The tradeoff is that a waiting client holds one server slot until it leaves; the server limits slots (see Trust model).
 
-6. **Message Decryption**:
-   - Each client receives the encrypted message from the server.
-   - The client uses the shared encryption key and derived AES key to decrypt the message locally. GCM authenticates every message, so tampered data is detected and reported instead of being dropped silently. Because the channel tag is derived from the key, a wrong key does not decrypt garbage: it opens a different, empty channel, and the client says "You are alone in ..." when nobody else is there.
-   - Once decrypted, the message is displayed in the chat interface for the user to read.
+**A wrong key looks like nobody joined.** If you and the other user typed different secret keys, you do not connect to each
+other at all (the server pairs by an id derived from the key) and both of you simply keep waiting. If you do reach each other
+with different keys (a rare id collision) both clients stop with: "Could not connect securely. Someone else may have used your
+code, or the connection was tampered with. Make up a NEW code together before trying again." The same message appears when a
+third user tries a key that is already in use. A key can pair only once per hour; after any pairing, successful or not, pick a new
+secret key.
 
-By adhering to this process, CipherChat ensures that all communication remains secure, private, and accessible only to users with the correct pre-defined encryption key.
+**Handles are not identities.** A handle is only a name label. It travels inside the encrypted session (never to the server) and
+anyone who holds the secret key can choose any handle. Treat it like a nickname, not as proof of who is typing.
 
-## Protocol v3
+## How it works
 
-Old (v1/v2) and new clients and servers cannot talk to each other: upgrade all of them together. A v3 server answers a v2 client's first line with `ERR version` and closes; a v3 client talking to an older server sees the connection close and reports "protocol mismatch?".
+1. Both users derive a short **rendezvous id** from the secret key with Argon2id (3 passes, 256 MiB, fixed salt), truncated to
+   24 bits, and send `HELLO 5 <id> <random nonce>` to the server. The server pairs the first two connections with the same id
+   and tells each its role and the other's nonce. It never sees the key.
+2. The two clients run **CPace** (password-authenticated key exchange, ristretto255 with SHA-512, exactly as
+   `draft-irtf-cfrg-cpace-21`) over the relay: each sends one 32-byte message (`KEY`), computes the shared secret, and then each
+   sends a 64-byte key-confirmation tag (`CONFIRM`). A server that does not know the key cannot compute the shared secret, and
+   cannot test guesses offline from what it relays.
+3. From the CPace output (ISK) the clients derive, with HKDF-SHA256, a send chain key and a receive chain key and a session id.
+   **Every message uses a fresh key**: a per-direction hash chain (HMAC-SHA256) gives one AES-256-GCM key per message and the old
+   key is deleted, so earlier messages stay safe even if a later key leaks. Messages are padded to multiples of 256 bytes, carry a
+   strict increasing number (a replayed, reordered or missing message ends the chat), and authenticate their header. A session ends
+   after 100,000 messages per direction.
+4. The handle is sent as the first encrypted message of the session. Ending the chat sends an encrypted end-of-session message.
 
-**Framing.** One ASCII line per command, tokens separated by single spaces, terminated by `\n`. The server checks every token against a closed grammar (verbs from a fixed set, tags and Base64 by charset and length) and drops the connection on any violation or over-length line (max 11100 characters). It never decodes or decrypts a payload.
+### Cryptography and dependencies
 
-**Channels.** A channel is a `(tag, key)` pair; the lobby (`general`), rooms and private chats are all the same thing. The *tag* is an opaque 22-character id (`A-Za-z0-9_-`) the server routes by. Clients derive it from the key: `Base64Url(PBKDF2-SHA256(key, salt = "cipherchat-channel-v1|room|<name>" or "...|dm|<a>|<b>", 600000, 16 bytes))`. The salt domain differs from the random per-message salts of the message key, so the tag does not give away the message key. Consequences: a wrong key leads to a different, empty channel; only key holders can join a channel; a private chat name is the sorted, case-insensitive user pair, so both sides derive the same tag.
+- **CPace** (CPACE-RISTR255-SHA512, draft-irtf-cfrg-cpace-21), **Argon2id** and the ristretto255 group maths come from
+  **libsodium** (NuGet package `libsodium` 1.0.22, by the libsodium author, ISC licence). It is referenced by the client only. We
+  write only the CPace glue; the draft's test vectors are checked byte for byte in the tests. The draft is not yet an RFC, so the
+  revision is pinned.
+- Everything else uses the .NET base library: AES-256-GCM, HKDF-SHA256, HMAC-SHA256/SHA-512, SHA-256/512, random numbers.
+- Key material is zeroed after use on a best-effort basis (managed memory cannot be fully scrubbed).
+
+## Protocol v5
+
+One ASCII line per command, tokens separated by single spaces, ending in `\n`. The grammar is closed: the server drops the
+connection on any line that does not match (or arrives in the wrong order), and over-length lines (max 8300 characters). It
+checks Base64 by charset, canonical padding and length and never decodes it.
 
 **Client to server**
 
 | Line | Meaning |
 |---|---|
-| `HELLO 3` | handshake, must be the first line |
-| `JOIN <tag> <presence>` | join a channel; `presence` is the username encrypted under the channel key |
-| `LEAVE <tag>` | leave a channel |
-| `MSG <tag> <payload>` | send an encrypted message to the channel's other members |
-| `HIST <tag> <afterId> <max>` | request retained messages with id > `afterId` (last `max`, 1-50); `ERR unsupported` if the server keeps no history |
+| `HELLO 5 <rid:6 hex> <nonce:32 hex>` | first line only (lowercase hex). Anything else as first line gets `ERR version` |
+| `KEY <base64, 32 bytes>` | CPace message, once, after `PAIRED` |
+| `CONFIRM <base64, 64 bytes>` | key-confirmation tag, once, after your own `KEY` |
+| `MSG <base64, 298..6186 bytes>` | encrypted message: 26-byte header + 256*k bytes (k = 1..24) + 16-byte tag; only after your own `CONFIRM` |
 | `PING` | the server answers `PONG` |
 
 **Server to client**
 
 | Line | Meaning |
 |---|---|
-| `WELCOME 3 <mid>` | handshake reply; `mid` is a per-connection counter, not an identity |
-| `MEMBER <tag> <mid> <presence>` | roster entry on join: current members first, the joiner itself last (end of roster) |
-| `JOINED <tag> <mid> <presence>` / `LEFT <tag> <mid>` | membership changes; `LEFT` is also sent when a connection drops (even a crash) |
-| `MSG <tag> <id> <payload>` | a message; `id` is a per-channel counter assigned by the server |
-| `ACK <tag> <id>` | to the sender: the id its message got |
-| `HIST <tag> <id> <payload>` ... `HISTEND <tag> <headId>` | history replay, oldest first, then the end marker with the channel's current head id (a head lower than the client's last id means the server lost state) |
+| `WAIT` | you are first; waiting for the other user (no time limit) |
+| `PAIRED <1|2> <peer nonce>` | paired; your role (1 = first) and the other's nonce |
+| `KEY` / `CONFIRM` / `MSG <base64>` | relayed byte for byte from the other user, no sender field |
+| `GONE` | the other user left (the server then closes your connection) |
 | `PONG` | reply to `PING` |
-| `ERR <code>` | `version`, `notjoined`, `alreadyjoined`, `limit` (max 16 channels per connection), `unsupported` |
+| `ERR <code>` | `version`, `used` (the key's id is taken or burned), `full`, `rate`, `timeout` |
 
-`MSG`/`HIST`/`LEAVE` need membership (`ERR notjoined` otherwise). Payloads and presence blobs are Base64 of `version(0x03) | salt(16) | nonce(12) | ciphertext | tag(16)` (AES-256-GCM, key from PBKDF2-SHA256, 600,000 iterations over a random per-message salt). The additional authenticated data is the version byte followed by the channel tag, so the server cannot move a message to another channel. Limits (`ProtocolLimits`): usernames 1-20 characters of `A-Za-z0-9_.-`, messages up to 2000 characters, payloads 60-10984 characters, presence up to 128 characters. Username rules are enforced by the clients only; the server cannot see usernames (see Trust model).
+## Trust model (what you are and are not protected from)
 
-## Trust model
+**The server and the network cannot read your chat.** A passive observer or an honest-but-curious server learns nothing about
+the content, the secret key, the handles or the session keys, and cannot test guesses of your key offline from what it relays.
+Past chats stay safe even if the secret key leaks later (forward secrecy per message). Messages cannot be forged, replayed or
+reordered without ending the chat.
 
-- Transport is plain TCP: no TLS. Only payloads and presence blobs are encrypted client-side; framing, line lengths, timing, IP addresses and connection times are visible to anyone on the path. TLS is a deliberate, documented-only decision for now.
-- The server never holds a key and cannot read messages or usernames (inside the ciphertext). It sees: which opaque channel tag each connection joined, who is in each tag (as opaque per-connection numbers and encrypted presence blobs), message sizes, timing and IP addresses. It can tell that two connections share a channel, and can run an offline guess of a channel key against a tag (no cheaper than guessing against any ciphertext it relays).
-- The server does not log payloads, presence blobs, tags or IP addresses; it logs only unexpected errors. Treat the host as sensitive metadata all the same.
-- History at rest: the server stores exactly the opaque payloads clients produced (AES-256-GCM under keys the server never has), so history is encrypted at rest by construction; no server-side key exists (it would sit next to the data and add nothing). Files are named by the hex SHA-256 of the tag, so a directory listing does not yield usable channel tags. Still visible at rest to whoever reads the directory: that a channel exists, message count, sizes, order and server-side timestamps. No usernames, IPs or connection numbers are stored. Retained ciphertext can be attacked offline, so a weak key is a stored-data risk: use long random passphrases. Timestamps and ids in replays come from the server and are untrusted. The operator holds the history; delete the directory to erase it.
-- Private chats: the pair key is agreed out of band and is the only secret between the two users. The server is not involved in key agreement, so it cannot substitute keys, but a weak pair key can be guessed offline from any intercepted ciphertext. Use a long random passphrase. Anyone who knows the pair key can read and write the private chat and claim either name.
-- Anyone who can reach the port can connect, join tags and relay, inject, drop or replay lines. AES-GCM stops them reading or forging messages without the key, and the tag in the authenticated data stops moving a message to another channel, but not replay, dropping or flooding. Any holder of a channel key can claim any username (no sender authentication). Server-assigned ids are untrusted.
-- A leaked or weak key exposes all past and future traffic of its channels (PBKDF2 slows guessing, it does not prevent it). Keys live only in client memory; they are never sent, logged or stored. Run on loopback/LAN or inside a VPN/SSH tunnel.
+**What a malicious server (or someone on the network path) can still do**
+1. *Online guessing*: in each connection attempt it can pose as the other user with one guessed key, so each attempt allows at
+   most one guess per user; every wrong guess shows both of you the failure message. In practice a handful of guesses.
+2. *The rendezvous id limits weak keys*: the id is 24 bits derived from your key with an expensive function. A malicious server
+   can build a dictionary of likely keys, narrow the candidates by the id, and then try one or two of them in the online guess above.
+   **A key that is among the server's top ~16 million guesses can be identified and then used to read the chat silently.** A key it
+   cannot narrow to one or two candidates is safe. That is why the client rejects short and patterned keys and why you should
+   use 4 or more random words.
+3. *Metadata and denial of service*: it sees both IP addresses, the times, the rendezvous id (which links the two IPs), the number,
+   timing and padded size (in 256-byte steps) of messages. It (or the network) can drop, delay, end or burn pairings, and lie
+   about who left (`GONE`). There is **no TLS**, so a network observer sees the same metadata and can do the same.
+
+**What it cannot do**: read the chat passively; decrypt old chats even if it later learns the key; forge, replay or reorder messages
+undetected.
+
+**Not protected**: malware or a keylogger on your computer; someone shoulder-surfing the terminal; the two users being
+tricked into sharing the key with the wrong user; a handle used as proof of identity; anonymity from the server; post-quantum
+attackers (a recording could be decrypted later by one).
+
+**Server abuse limits** (the server holds no secrets): 200 connections in total, 4 per IP, at most 100 waiting users,
+10 new connections per IP per minute, at most 5 pairings per IP per hour that relay no message, one pairing per rendezvous id
+(then burned for an hour), `HELLO` within 10 seconds, both `CONFIRM`s within 30 seconds after pairing, 90 seconds without any line
+closes a connection (clients ping every 30 seconds), messages 10 per second (burst 30), pings 4 per minute.
+A user waiting without a time limit occupies a waiting slot; these limits bound how many one address can hold.
+
+## Tests
+
+```bash
+dotnet test CipherChat.sln
+```
+
+348 xUnit tests: the draft-21 known-answer vectors, key derivation and the code rules, the secure channel (tampering, replay,
+order, padding, handles), the wire grammar on both sides, the server (raw sockets on an ephemeral port: pairing, burns, limits,
+deadlines, order enforcement, relay) and the client session end to end, plus a scripted malicious server (wrong keys, bad points,
+reflected, replayed, reordered or forged lines, fake `GONE`, silence, garbage). Tests use throwaway ports and never touch disk.
+CI (`.github/workflows/ci.yml`) runs `dotnet build CipherChat.sln` and `dotnet test CipherChat.sln` on pushes and pull requests
+to `main`.
 
 ## Contributing
 
@@ -172,4 +215,4 @@ Contributions are welcome! Please fork the repository and submit a pull request.
 
 ## License
 
-This project is licensed under the MIT License. See the LICENSE file for details.
+This project is licensed under the MIT License. See the LICENSE file for details. libsodium is distributed under the ISC licence.

@@ -92,7 +92,7 @@ public class ChatSessionTests : IDisposable
         a.Quit();
         Assert.Equal(EndReason.UserQuit, await a.Completion);
         Assert.Equal(EndReason.PeerLeft, await b.Completion.WaitAsync(TimeSpan.FromSeconds(5)));
-        Assert.True(Has(b, "The other person left the chat"));
+        Assert.True(Has(b, "The other user left the chat"));
         Assert.False(ChatSession.IsFailure(EndReason.PeerLeft));
         Assert.NotNull(b.Send("too late"));
     }
@@ -103,7 +103,7 @@ public class ChatSessionTests : IDisposable
         var (a, b) = await Chatting();
         a.Dispose();
         Assert.Equal(EndReason.PeerDisconnected, await b.Completion.WaitAsync(TimeSpan.FromSeconds(5)));
-        Assert.True(Has(b, "The other person disconnected"));
+        Assert.True(Has(b, "The other user disconnected"));
         Assert.True(ChatSession.IsFailure(EndReason.PeerDisconnected));
     }
 
@@ -337,13 +337,13 @@ public class ChatSessionTests : IDisposable
             "* Connecting...",
             "* Connected.",
             "* Waiting for the other connection...",
-            "* Other person found.",
+            "* Other user found.",
             "* Verifying...",
             "* Secure session established.",
             "* bob is in the chat.",
         }, a.SnapshotLines());
-        // the second person never waited
-        Assert.Equal(new[] { "* Connecting...", "* Connected.", "* Other person found.", "* Verifying...", "* Secure session established.", "* Anna is in the chat." },
+        // the second user never waited
+        Assert.Equal(new[] { "* Connecting...", "* Connected.", "* Other user found.", "* Verifying...", "* Secure session established.", "* Anna is in the chat." },
             b.SnapshotLines());
         Assert.DoesNotContain(a.SnapshotLines(), l => l.Contains("Checking the code") || l.Contains('\n'));
     }
@@ -351,7 +351,7 @@ public class ChatSessionTests : IDisposable
     [Fact]
     public void Describe_HasTheMessagesFromThePlan()
     {
-        Assert.Equal("The other person left the chat.", ChatSession.Describe(EndReason.PeerLeft));
+        Assert.Equal("The other user left the chat.", ChatSession.Describe(EndReason.PeerLeft));
         Assert.Equal("anna left the chat.", ChatSession.Describe(EndReason.PeerLeft, "anna"));
         Assert.Equal("anna disconnected.", ChatSession.Describe(EndReason.PeerDisconnected, "anna"));
         Assert.StartsWith("Could not connect securely. Someone else may have used your code, or the connection was tampered with. Make up a NEW code together before trying again.", ChatSession.Describe(EndReason.SecurityFailure));
