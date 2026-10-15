@@ -33,6 +33,22 @@ public sealed class RateLimiter
         }
     }
 
+    // True when at least one token is available (does not take it).
+    public bool HasToken
+    {
+        get
+        {
+            lock (gate)
+            {
+                long now = clock();
+                return Math.Min(capacity, tokens + Math.Max(0, now - last) * refillPerMs) >= 1;
+            }
+        }
+    }
+
+    // Takes a token if there is one; a bucket at zero stays at zero.
+    public void Charge() => TryTake();
+
     // True when the bucket is full again (the entry can be forgotten).
     public bool IsIdle
     {

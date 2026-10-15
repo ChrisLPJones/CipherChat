@@ -7,29 +7,20 @@ namespace CipherChatServer;
 // both copies are equal. Change both together.
 public static class ProtocolLimits
 {
-    public const int MinUsernameLength = 1;
-    public const int MaxUsernameLength = 20;
+    // Wire protocol v5 (paired-code chat).
     public const int MaxMessageChars = 2000;
-    // Wire v4 (end-to-end redesign). The v3 constants above are removed together with the v3 code
-    // (tasks T4/T6); MaxLineChars then replaces MaxLineChars.
-    // Longest v4 line: "MSG " + 20 + " " + 8248 = 8273.
-    public const int MaxLineChars = 8400;
-    public const int PubKeyChars = 88;      // Base64 of 65 bytes
-    public const int SigChars = 88;         // Base64 of 64 bytes
-    public const int ChallengeChars = 44;   // Base64 of 32 bytes
-    public const int OfferChars = 208;      // Base64 of 156 bytes
-    public const int AcceptChars = 240;     // Base64 of 179 bytes
-    public const int ConfirmChars = 68;     // Base64 of 50 bytes
-    public const int KnockChars = 100;      // Base64 of 74 bytes
+    public const int MaxTextBytes = 6000;   // 2000 characters of up to 3 UTF-8 bytes
+    public const int PadBlock = 256;
+    // Longest line: "MSG " + 8248 = 8252; the limit leaves some room and bounds every read.
+    public const int MaxLineChars = 8300;
+    public const int RidChars = 6;          // 3 bytes as lowercase hex
+    public const int NonceChars = 32;       // 16 bytes as lowercase hex
+    public const int KeyChars = 44;         // Base64 of 32 bytes
+    public const int ConfirmChars = 88;     // Base64 of 64 bytes
     public const int MinMsgChars = 400;     // Base64 of 298 bytes (1 padded block)
     public const int MaxMsgChars = 8248;    // Base64 of 6186 bytes (24 padded blocks)
-    public const int MaxTextBytes = 6000;
-    public const int PadBlock = 256;
-    public const int MaxChats = 16;
-    public const int MaxPendingRequests = 20;
-    public const int MaxUserListEntries = 100;
-    public const int MinCodeChars = 12;     // v5
-    public const int MaxCodeChars = 100;    // v5
+    public const int MinCodeChars = 12;
+    public const int MaxCodeChars = 100;
 
     // Reads one newline-delimited line, never buffering more than maxChars characters.
     // Returns null at end of stream; throws InvalidDataException when the line is too long.

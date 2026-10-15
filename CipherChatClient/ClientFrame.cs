@@ -1,35 +1,27 @@
 namespace CipherChatClient;
 
-public enum ServerEventKind { Welcome, Ready, Key, Offer, Accept, Confirm, Msg, Knock, Offline, Gone, Pong, Err, UserList }
+public enum ServerEventKind { Wait, Paired, Key, Confirm, Msg, Gone, Pong, Err }
 
-// One validated server-to-client line (wire protocol v4).
+// One validated server-to-client line (wire protocol v5).
 public sealed class ServerEvent
 {
     public ServerEventKind Kind { get; init; }
-    public string User { get; init; }          // READY/KEY/OFFLINE/GONE user, relay sender, ERR user
-    public string Data { get; init; }          // challenge, key, blob (Base64) or error code
-    public string[] Users { get; init; }       // USERLIST
+    public int Role { get; init; }         // PAIRED: 1 or 2
+    public string Nonce { get; init; }     // PAIRED: the peer's nonce, 32 lowercase hex chars
+    public string Data { get; init; }      // KEY/CONFIRM/MSG: Base64; ERR: the error code
 }
 
-// Wire grammar v4, client side (the server has its own copy in ServerFrameV4.cs; tests cross-check them).
-//
+// Wire grammar v5, client side (the server has its own copy in ServerFrame.cs; tests cross-check them).
 public static class ClientFrame
 {
-    public const int Version = 4;
-    public static readonly string[] ErrorCodes =
-        { "version", "auth", "taken", "nouser", "self", "rate", "full", "limit", "replaced", "timeout", "notauth" };
+    public const int Version = 5;
+    public static readonly string[] ErrorCodes = { "version", "used", "full", "rate", "timeout" };
 
     // Client-to-server lines (without the trailing newline).
-    public static string Hello() => $"HELLO {Version}";
-    public static string Register(string user, byte[] pub, byte[] sig) => $"REGISTER {user} {Convert.ToBase64String(pub)} {Convert.ToBase64String(sig)}";
-    public static string Login(string user, byte[] sig) => $"LOGIN {user} {Convert.ToBase64String(sig)}";
-    public static string Key(string user) => $"KEY {user}";
-    public static string Offer(string to, byte[] blob) => $"OFFER {to} {Convert.ToBase64String(blob)}";
-    public static string Accept(string to, byte[] blob) => $"ACCEPT {to} {Convert.ToBase64String(blob)}";
-    public static string Confirm(string to, byte[] blob) => $"CONFIRM {to} {Convert.ToBase64String(blob)}";
-    public static string Msg(string to, byte[] blob) => $"MSG {to} {Convert.ToBase64String(blob)}";
-    public static string Knock(string to, byte[] blob) => $"KNOCK {to} {Convert.ToBase64String(blob)}";
-    public static string Users() => "USERS";
+    public static string Hello(string ridHex, string nonceHex) => $"HELLO {Version} {ridHex} {nonceHex}";
+    public static string Key(byte[] key) => $"KEY {Convert.ToBase64String(key)}";
+    public static string Confirm(byte[] tag) => $"CONFIRM {Convert.ToBase64String(tag)}";
+    public static string Msg(byte[] blob) => $"MSG {Convert.ToBase64String(blob)}";
     public static string Ping() => "PING";
 
     // Returns false for any line outside the grammar.
@@ -42,80 +34,42 @@ public static class ClientFrame
 
         switch (t[0])
         {
-            case "WELCOME":
-                if (t.Length != 3 || t[1] != "4" || !IsBase64Bytes(t[2], 32)) return false;
-                ev = new ServerEvent { Kind = ServerEventKind.Welcome, Data = t[2] };
-                return true;
-            case "READY":
-            case "OFFLINE":
+            case "WAIT":
             case "GONE":
-                if (t.Length != 2 || !IsUser(t[1])) return false;
-                ev = new ServerEvent { Kind = t[0] == "READY" ? ServerEventKind.Ready : t[0] == "OFFLINE" ? ServerEventKind.Offline : ServerEventKind.Gone, User = t[1] };
-                return true;
-            case "KEY":
-                if (t.Length != 3 || !IsUser(t[1]) || !IsBase64Bytes(t[2], 65)) return false;
-                ev = new ServerEvent { Kind = ServerEventKind.Key, User = t[1], Data = t[2] };
-                return true;
-            case "OFFER": return Relay(t, ServerEventKind.Offer, 156, out ev);
-            case "ACCEPT": return Relay(t, ServerEventKind.Accept, 179, out ev);
-            case "CONFIRM": return Relay(t, ServerEventKind.Confirm, 50, out ev);
-            case "KNOCK": return Relay(t, ServerEventKind.Knock, 74, out ev);
-            case "MSG":
-                if (t.Length != 3 || !IsUser(t[1]) || !IsMsgBlob(t[2])) return false;
-                ev = new ServerEvent { Kind = ServerEventKind.Msg, User = t[1], Data = t[2] };
-                return true;
             case "PONG":
                 if (t.Length != 1) return false;
-                ev = new ServerEvent { Kind = ServerEventKind.Pong };
+                ev = new ServerEvent { Kind = t[0] == "WAIT" ? ServerEventKind.Wait : t[0] == "GONE" ? ServerEventKind.Gone : ServerEventKind.Pong };
+                return true;
+            case "PAIRED":
+                if (t.Length != 3 || (t[1] != "1" && t[1] != "2") || !IsHex(t[2], ProtocolLimits.NonceChars)) return false;
+                ev = new ServerEvent { Kind = ServerEventKind.Paired, Role = t[1][0] - '0', Nonce = t[2] };
+                return true;
+            case "KEY":
+                if (t.Length != 2 || !IsBase64Bytes(t[1], 32)) return false;
+                ev = new ServerEvent { Kind = ServerEventKind.Key, Data = t[1] };
+                return true;
+            case "CONFIRM":
+                if (t.Length != 2 || !IsBase64Bytes(t[1], 64)) return false;
+                ev = new ServerEvent { Kind = ServerEventKind.Confirm, Data = t[1] };
+                return true;
+            case "MSG":
+                if (t.Length != 2 || !IsMsgBlob(t[1])) return false;
+                ev = new ServerEvent { Kind = ServerEventKind.Msg, Data = t[1] };
                 return true;
             case "ERR":
-                if ((t.Length != 2 && t.Length != 3) || Array.IndexOf(ErrorCodes, t[1]) < 0) return false;
-                if (t.Length == 3 && !IsUser(t[2])) return false;
-                ev = new ServerEvent { Kind = ServerEventKind.Err, Data = t[1], User = t.Length == 3 ? t[2] : null };
+                if (t.Length != 2 || Array.IndexOf(ErrorCodes, t[1]) < 0) return false;
+                ev = new ServerEvent { Kind = ServerEventKind.Err, Data = t[1] };
                 return true;
-            case "USERLIST":
-                return ParseUserList(t, out ev);
             default:
                 return false;
         }
     }
 
-    private static bool ParseUserList(string[] t, out ServerEvent ev)
+    public static bool IsHex(string s, int chars)
     {
-        ev = null;
-        if (t.Length < 2) return false;
-        string c = t[1];
-        if (c.Length < 1 || c.Length > 3 || (c.Length > 1 && c[0] == '0')) return false;
-        foreach (char ch in c) if (ch < '0' || ch > '9') return false;
-        int n = int.Parse(c, System.Globalization.CultureInfo.InvariantCulture);
-        if (n > ProtocolLimits.MaxUserListEntries || t.Length != 2 + n) return false;
-        string[] names = new string[n];
-        HashSet<string> seen = new();
-        for (int i = 0; i < n; i++)
-        {
-            if (!IsUser(t[2 + i]) || !seen.Add(t[2 + i])) return false;
-            names[i] = t[2 + i];
-        }
-        ev = new ServerEvent { Kind = ServerEventKind.UserList, Users = names };
-        return true;
-    }
-
-    private static bool Relay(string[] t, ServerEventKind kind, int bytes, out ServerEvent ev)
-    {
-        ev = null;
-        if (t.Length != 3 || !IsUser(t[1]) || !IsBase64Bytes(t[2], bytes)) return false;
-        ev = new ServerEvent { Kind = kind, User = t[1], Data = t[2] };
-        return true;
-    }
-
-    public static bool IsUser(string s)
-    {
-        if (s == null || s.Length < ProtocolLimits.MinUsernameLength || s.Length > ProtocolLimits.MaxUsernameLength) return false;
+        if (s == null || s.Length != chars) return false;
         foreach (char c in s)
-        {
-            bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
-            if (!ok) return false;
-        }
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
         return true;
     }
 

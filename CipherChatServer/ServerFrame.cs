@@ -1,25 +1,23 @@
 namespace CipherChatServer;
 
-public enum ClientVerb { Hello, Register, Login, Key, Offer, Accept, Confirm, Msg, Knock, Users, Ping }
+public enum ClientVerb { Hello, Key, Confirm, Msg, Ping }
 
-// One validated client-to-server line (wire protocol v4).
+// One validated client-to-server line (wire protocol v5).
 public sealed class ClientCommand
 {
     public ClientVerb Verb { get; init; }
-    public string User { get; init; }   // REGISTER/LOGIN: the account name; others: the target user
-    public string Pub { get; init; }    // REGISTER: Base64 identity key (opaque here)
-    public string Data { get; init; }   // LOGIN/REGISTER: signature; OFFER/ACCEPT/CONFIRM/MSG/KNOCK: blob (Base64, opaque)
+    public string Rid { get; init; }     // HELLO: 6 lowercase hex chars
+    public string Nonce { get; init; }   // HELLO: 32 lowercase hex chars
+    public string Data { get; init; }    // KEY/CONFIRM/MSG: Base64, opaque to the server
 }
 
-// Wire grammar v4, server side. Single-space separated ASCII tokens, closed grammar. The server never decodes
+// Wire grammar v5, server side. Single-space separated ASCII tokens, closed grammar. The server never decodes
 // Base64: it checks charset, canonical padding, exact lengths (or the padded-block structure for MSG) only.
-// The client has its own copy (ClientFrame.cs); tests cross-check them. Wire protocol v4.
+// The client has its own copy (ClientFrame.cs); tests cross-check them.
 public static class ServerFrame
 {
-    public const int Version = 4;
-    public const string HelloLine = "HELLO 4";
-    public static readonly string[] ErrorCodes =
-        { "version", "auth", "taken", "nouser", "self", "rate", "full", "limit", "replaced", "timeout", "notauth" };
+    public const int Version = 5;
+    public static readonly string[] ErrorCodes = { "version", "used", "full", "rate", "timeout" };
 
     public static bool TryParse(string line, out ClientCommand cmd)
     {
@@ -31,59 +29,36 @@ public static class ServerFrame
         switch (t[0])
         {
             case "HELLO":
-                if (t.Length != 2 || t[1] != "4") return false;
-                cmd = new ClientCommand { Verb = ClientVerb.Hello };
+                if (t.Length != 4 || t[1] != "5" || !IsHex(t[2], ProtocolLimits.RidChars) || !IsHex(t[3], ProtocolLimits.NonceChars)) return false;
+                cmd = new ClientCommand { Verb = ClientVerb.Hello, Rid = t[2], Nonce = t[3] };
                 return true;
             case "PING":
                 if (t.Length != 1) return false;
                 cmd = new ClientCommand { Verb = ClientVerb.Ping };
                 return true;
-            case "USERS":
-                if (t.Length != 1) return false;
-                cmd = new ClientCommand { Verb = ClientVerb.Users };
-                return true;
-            case "REGISTER":
-                if (t.Length != 4 || !IsUser(t[1]) || !IsBase64Bytes(t[2], 65) || !IsBase64Bytes(t[3], 64)) return false;
-                cmd = new ClientCommand { Verb = ClientVerb.Register, User = t[1], Pub = t[2], Data = t[3] };
-                return true;
-            case "LOGIN":
-                if (t.Length != 3 || !IsUser(t[1]) || !IsBase64Bytes(t[2], 64)) return false;
-                cmd = new ClientCommand { Verb = ClientVerb.Login, User = t[1], Data = t[2] };
-                return true;
             case "KEY":
-                if (t.Length != 2 || !IsUser(t[1])) return false;
-                cmd = new ClientCommand { Verb = ClientVerb.Key, User = t[1] };
+                if (t.Length != 2 || !IsBase64Bytes(t[1], 32)) return false;
+                cmd = new ClientCommand { Verb = ClientVerb.Key, Data = t[1] };
                 return true;
-            case "OFFER": return Blob(t, ClientVerb.Offer, 156, out cmd);
-            case "ACCEPT": return Blob(t, ClientVerb.Accept, 179, out cmd);
-            case "CONFIRM": return Blob(t, ClientVerb.Confirm, 50, out cmd);
-            case "KNOCK": return Blob(t, ClientVerb.Knock, 74, out cmd);
+            case "CONFIRM":
+                if (t.Length != 2 || !IsBase64Bytes(t[1], 64)) return false;
+                cmd = new ClientCommand { Verb = ClientVerb.Confirm, Data = t[1] };
+                return true;
             case "MSG":
-                if (t.Length != 3 || !IsUser(t[1]) || !IsMsgBlob(t[2])) return false;
-                cmd = new ClientCommand { Verb = ClientVerb.Msg, User = t[1], Data = t[2] };
+                if (t.Length != 2 || !IsMsgBlob(t[1])) return false;
+                cmd = new ClientCommand { Verb = ClientVerb.Msg, Data = t[1] };
                 return true;
             default:
                 return false;
         }
     }
 
-    private static bool Blob(string[] t, ClientVerb verb, int bytes, out ClientCommand cmd)
+    // Exactly 'chars' lowercase hexadecimal characters.
+    public static bool IsHex(string s, int chars)
     {
-        cmd = null;
-        if (t.Length != 3 || !IsUser(t[1]) || !IsBase64Bytes(t[2], bytes)) return false;
-        cmd = new ClientCommand { Verb = verb, User = t[1], Data = t[2] };
-        return true;
-    }
-
-    // Lowercase user name: 1-20 chars of [a-z0-9_.-].
-    public static bool IsUser(string s)
-    {
-        if (s == null || s.Length < ProtocolLimits.MinUsernameLength || s.Length > ProtocolLimits.MaxUsernameLength) return false;
+        if (s == null || s.Length != chars) return false;
         foreach (char c in s)
-        {
-            bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
-            if (!ok) return false;
-        }
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
         return true;
     }
 
@@ -130,14 +105,11 @@ public static class ServerFrame
     }
 
     // Server-to-client lines (without the trailing newline).
-    public static string Welcome(string challengeB64) => $"WELCOME {Version} {challengeB64}";
-    public static string Ready(string user) => $"READY {user}";
-    public static string Key(string user, string pubB64) => $"KEY {user} {pubB64}";
-    public static string Relay(string verb, string from, string blob) => $"{verb} {from} {blob}";
-    public static string Offline(string user) => $"OFFLINE {user}";
-    public static string Gone(string user) => $"GONE {user}";
+    public const string Wait = "WAIT";
+    public const string Gone = "GONE";
     public const string Pong = "PONG";
-    public static string Err(string code, string user = null) => user == null ? $"ERR {code}" : $"ERR {code} {user}";
-    public static string UserList(IReadOnlyCollection<string> names) =>
-        names.Count == 0 ? "USERLIST 0" : $"USERLIST {names.Count} {string.Join(' ', names)}";
+    public static string Paired(int role, string peerNonceHex) => $"PAIRED {role} {peerNonceHex}";
+    public static string Relay(ClientVerb verb, string blob) =>
+        $"{(verb == ClientVerb.Key ? "KEY" : verb == ClientVerb.Confirm ? "CONFIRM" : "MSG")} {blob}";
+    public static string Err(string code) => $"ERR {code}";
 }
