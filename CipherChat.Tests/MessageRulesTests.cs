@@ -7,19 +7,44 @@ namespace CipherChat.Tests;
 public class MessageRulesTests
 {
     [Theory]
-    [InlineData("alice", true)]
+    [InlineData("a", true)]
+    [InlineData("Anna", true)]
     [InlineData("A_b.c-9", true)]
+    [InlineData("aaaaaaaaaaaaaaaaaaaa", true)]     // 20
+    [InlineData("aaaaaaaaaaaaaaaaaaaaa", false)]   // 21
     [InlineData("", false)]
-    [InlineData("aaaaaaaaaaaaaaaaaaaaa", false)] // 21 chars
-    [InlineData("aaaaaaaaaaaaaaaaaaaa", true)]    // 20 chars
+    [InlineData(null, false)]
     [InlineData("a b", false)]
+    [InlineData(" a", false)]
     [InlineData("a:b", false)]
-    [InlineData("josé", false)]
+    [InlineData("a*b", false)]
+    [InlineData("jos\u00e9", false)]
     [InlineData("a\u001bb", false)]
-    public void ValidateUsername(string name, bool valid)
+    [InlineData("a\u202eb", false)]
+    [InlineData("you", false)]
+    [InlineData("YOU", false)]
+    [InlineData("You", false)]
+    [InlineData("young", true)]
+    [InlineData("them", true)]
+    public void ValidateHandle(string handle, bool valid)
     {
-        Assert.Equal(valid, MessageRules.ValidateUsername(name) == null);
+        Assert.Equal(valid, MessageRules.ValidateHandle(handle) == null);
+        if (!valid) Assert.False(string.IsNullOrEmpty(MessageRules.ValidateHandle(handle)));   // always a plain message
     }
+
+    [Theory]
+    [InlineData("abc", 3, 1)]
+    [InlineData("abc", 1, 1)]
+    [InlineData("abc", 0, 0)]
+    [InlineData("a\U0001F600", 3, 2)]       // emoji = surrogate pair: removed whole
+    [InlineData("a\U0001F600", 1, 1)]
+    [InlineData("\U0001F600\U0001F600", 2, 2)]
+    [InlineData("\U0001F600\U0001F600", 4, 2)]
+    [InlineData("\uD83D", 1, 1)]             // a lone surrogate is removed on its own
+    [InlineData("\uDE00\uDE00", 2, 1)]       // two low surrogates are not a pair
+    [InlineData("\uD83D\uD83D", 2, 1)]
+    public void BackspaceLength_RemovesAWholeSurrogatePair(string text, int cursor, int expected) =>
+        Assert.Equal(expected, MessageRules.BackspaceLength(text, cursor));
 
     [Fact]
     public void Sanitizer_StripsControlChars_KeepsUnicode()
@@ -42,16 +67,6 @@ public class MessageRulesTests
     public void Sanitizer_StripsFormatAndSeparatorChars(string input)
     {
         Assert.Equal("ab", MessageRules.SanitizeForDisplay(input));
-    }
-
-    [Fact]
-    public void TryDecrypt_ClassifiesResults()
-    {
-        string cipher = AESecureString.EncryptString("hi", "k1");
-        Assert.Equal(DecryptStatus.Ok, MessageRules.TryDecrypt(cipher, "k1", out string plain));
-        Assert.Equal("hi", plain);
-        Assert.Equal(DecryptStatus.WrongKey, MessageRules.TryDecrypt(cipher, "k2", out _));
-        Assert.Equal(DecryptStatus.Malformed, MessageRules.TryDecrypt("???", "k1", out _));
     }
 
     [Fact]

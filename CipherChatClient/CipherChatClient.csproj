@@ -7,4 +7,12 @@
     <Nullable>disable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="CipherChat.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="libsodium" Version="[1.0.22]" />
+  </ItemGroup>
+
 </Project>

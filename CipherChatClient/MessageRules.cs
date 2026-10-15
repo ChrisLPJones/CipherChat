@@ -1,28 +1,32 @@
 using System.Globalization;
-using System.Security.Cryptography;
 using System.Text;
 
 namespace CipherChatClient;
 
-public enum DecryptStatus { Ok, WrongKey, Malformed }
-
 // Client-side rules that are independent of the Console UI so they can be unit tested.
 public static class MessageRules
 {
-    // Returns null when valid, otherwise the reason it is rejected.
-    public static string ValidateUsername(string name)
+    public const string NeutralPeerLabel = "Them";
+
+    // How many UTF-16 units Backspace removes before the cursor: 2 for a surrogate pair (one emoji), otherwise 1.
+    public static int BackspaceLength(string text, int cursor)
     {
-        if (string.IsNullOrEmpty(name) || name.Length < ProtocolLimits.MinUsernameLength)
-            return "A username is required to proceed.";
-        if (name.Length > ProtocolLimits.MaxUsernameLength)
-            return $"The username must be at most {ProtocolLimits.MaxUsernameLength} characters.";
-        foreach (char c in name)
+        if (cursor >= 2 && char.IsLowSurrogate(text[cursor - 1]) && char.IsHighSurrogate(text[cursor - 2])) return 2;
+        return cursor >= 1 ? 1 : 0;
+    }
+
+    // Returns null when valid, otherwise the reason in plain words. A handle is a display name, not an identity:
+    // 1-20 characters from [A-Za-z0-9_.-]; "you" is reserved because own lines are shown as "You:".
+    public static string ValidateHandle(string handle)
+    {
+        if (string.IsNullOrEmpty(handle)) return "Please enter a handle.";
+        if (handle.Length > ProtocolLimits.MaxHandleChars) return $"The handle may have at most {ProtocolLimits.MaxHandleChars} characters.";
+        foreach (char c in handle)
         {
-            bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-                      || c == '_' || c == '.' || c == '-';
-            if (!ok)
-                return "The username may only contain letters, digits, '_', '.' and '-' (no spaces or colons).";
+            bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
+            if (!ok) return "Use only letters, digits, '_', '.' and '-' in the handle (no spaces).";
         }
+        if (handle.Equals("you", StringComparison.OrdinalIgnoreCase)) return "That handle is reserved. Please choose another.";
         return null;
     }
 
@@ -39,24 +43,5 @@ public static class MessageRules
             sb.Append(c);
         }
         return sb.ToString();
-    }
-
-    // Decrypts one received line and classifies the outcome.
-    public static DecryptStatus TryDecrypt(string line, string key, out string plainText)
-    {
-        plainText = null;
-        try
-        {
-            plainText = AESecureString.DecryptCipher(line, key);
-            return DecryptStatus.Ok;
-        }
-        catch (CipherAuthenticationException)
-        {
-            return DecryptStatus.WrongKey;
-        }
-        catch (FormatException)
-        {
-            return DecryptStatus.Malformed;
-        }
     }
 }

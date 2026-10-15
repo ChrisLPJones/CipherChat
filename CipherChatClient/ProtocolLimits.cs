@@ -7,13 +7,21 @@ namespace CipherChatClient;
 // both copies are equal. Change both together.
 public static class ProtocolLimits
 {
-    public const int MinUsernameLength = 1;
-    public const int MaxUsernameLength = 20;
+    // Wire protocol v5 (paired-code chat).
     public const int MaxMessageChars = 2000;
-    public const int MaxPlaintextBytes = 8192;
-    // Base64 of 1 + 16 + 12 + 8192 + 16 = 8237 bytes is 10984 chars
-    public const int MaxLineChars = 11000;
-    public const int MinLineChars = 60;
+    public const int MaxHandleChars = 20;   // display name, sent only inside the encrypted session
+    public const int MaxTextBytes = 6000;   // 2000 characters of up to 3 UTF-8 bytes
+    public const int PadBlock = 256;
+    // Longest line: "MSG " + 8248 = 8252; the limit leaves some room and bounds every read.
+    public const int MaxLineChars = 8300;
+    public const int RidChars = 6;          // 3 bytes as lowercase hex
+    public const int NonceChars = 32;       // 16 bytes as lowercase hex
+    public const int KeyChars = 44;         // Base64 of 32 bytes
+    public const int ConfirmChars = 88;     // Base64 of 64 bytes
+    public const int MinMsgChars = 400;     // Base64 of 298 bytes (1 padded block)
+    public const int MaxMsgChars = 8248;    // Base64 of 6186 bytes (24 padded blocks)
+    public const int MinCodeChars = 12;
+    public const int MaxCodeChars = 100;
 
     // Reads one newline-delimited line, never buffering more than maxChars characters.
     // Returns null at end of stream; throws InvalidDataException when the line is too long.

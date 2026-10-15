@@ -1,337 +1,205 @@
-﻿using System.Net.Sockets;
-using System.Net;
 using System.Text;
-using System.Security;
 
 namespace CipherChatClient;
 
 class Program
 {
-    // List to store messages received from the chat server
-    private static readonly List<string> messages = [];
-
-    // TCP client for establishing and maintaining a connection to the server
-    private static readonly TcpClient client = new();
-    private static NetworkStream stream;
-
-    // Variables for managing user input, username and encryption key
+    private static ChatSession session;
+    private static readonly object ui = new();   // guards the input line and drawing only; never held while calling the session
     private static string currentInput = "";
-    private static string userName;
-    private static int currentCursorPosition = 0;
-    private static string encryptionKey;
-    private static string serverHost = ConnectionArgs.DefaultHost;
-    private static int serverPort = ConnectionArgs.DefaultPort;
+    private static int cursor;
 
     static async Task<int> Main(string[] args)
     {
-        // Validate "host port" arguments before any prompt
-        if (!ConnectionArgs.TryParse(args, out serverHost, out serverPort, out string argError))
+        if (!ConnectionArgs.TryParse(args, out string host, out int port, out string argError))
         {
             Console.Error.WriteLine(argError);
             Console.Error.WriteLine(ConnectionArgs.Usage);
             return 1;
         }
+        Console.CancelKeyPress += (s, e) => { e.Cancel = true; session?.Quit(); };
 
-        // Handle cleanup on application exit
-        Console.CancelKeyPress += HandleExit;
-        AppDomain.CurrentDomain.ProcessExit += (sender, e) => OnProcessExit();
+        var entry = PromptEntry();
+        if (entry == null) return 0;
 
-        // Step 1: Gather the user's username and encryption key
-        //GetUserName();
-        GetLogin();
-
-        // Step 2: Connect to the chat server
-        await ConnectToServer();
-
-        // Step 3: Begin receiving messages asynchronously
-        _ = Task.Run(() => ReceiveMessages());
-
-        // Step 4: Main loop to handle user input and send messages
-        while (client.Connected)
-        {
-            string input = GetUserInput();
-            if (input.Length > ProtocolLimits.MaxMessageChars)
-            {
-                AddSystemMessage($"Message too long (max {ProtocolLimits.MaxMessageChars} characters).");
-                continue;
-            }
-            SendMessage($"{userName}: {input}");
-        }
-        return 0;
-    }
-
-    // Prompt the user for their username and encryption key
-    private static void GetLogin(){
-        
+        session = new ChatSession(host, port, entry.Value.Code, new ChatSessionOptions { Handle = entry.Value.Handle });
+        session.LineAdded += _ => Redraw();
+        session.StateChanged += _ => Redraw();
         Console.Clear();
-        
-        // Validate the username against the protocol rules, re-prompting with the reason
-        string problem = null;
-        while (true)
+        Redraw();
+        _ = Task.Run(WatchResize);
+        await session.StartAsync();
+
+        // Key loop: poll so that the loop also ends when the session ends without a key press.
+        while (!session.IsEnded)
         {
-            Console.Write("Enter username: ");
-            string candidate = Console.ReadLine() ?? "";
-            Console.Clear();
-            problem = MessageRules.ValidateUsername(candidate);
-            if (problem == null)
+            if (!Console.KeyAvailable) { await Task.Delay(30); continue; }
+            string line = HandleKey(Console.ReadKey(intercept: true));
+            if (line == null) continue;
+            switch (Commands.Parse(line).Kind)
             {
-                userName = candidate;
-                break;
-            }
-            Console.SetCursorPosition(0, 1);
-            Console.WriteLine(problem);
-            Console.SetCursorPosition(0, 0);
-        }
-
-        // Check if empty Encryption key
-        while(string.IsNullOrWhiteSpace(encryptionKey)){
-            Console.Write("Enter encryption key: ");
-            encryptionKey = GetPassword();
-            Console.Clear();
-            if(encryptionKey.Length > 0){
-                break;
-            }
-            Console.SetCursorPosition(0,1);
-            Console.WriteLine("The encryption key is required to proceed.");
-            Console.SetCursorPosition(0, 0);
-        }
-    }
-
-    // Securely collect the encryption key while hiding input from display
-    private static string GetPassword()
-    {
-        string encryptionKey = string.Empty;
-        ConsoleKeyInfo keyInfo;
-        do
-        {
-            keyInfo = Console.ReadKey(intercept: true);
-
-            if (keyInfo.Key == ConsoleKey.Backspace && encryptionKey.Length > 0)
-            {
-                encryptionKey = encryptionKey.Remove(encryptionKey.Length - 1, 1);
-                Console.Write("\b \b");
-            }
-
-            if (!char.IsControl(keyInfo.KeyChar))
-            {
-                encryptionKey += keyInfo.KeyChar;
-                Console.Write("*");
-            }
-        } while (keyInfo.Key != ConsoleKey.Enter);
-
-        return encryptionKey;
-    }
-
-    // Establish a connection to the server and notify clients with an encrypted message
-    private static async Task ConnectToServer()
-    {
-        try
-        {
-            await client.ConnectAsync(serverHost, serverPort);
-            stream = client.GetStream();
-
-            string cipherText = AESecureString.EncryptString($"{userName} is Connected", encryptionKey);
-            byte[] userConnectedCipherBytes = Encoding.ASCII.GetBytes(cipherText + "\n");
-            await stream.WriteAsync(userConnectedCipherBytes);
-
-            Console.WriteLine($"Connected to the server at {serverHost}:{serverPort}...");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Failed to connect to {serverHost}:{serverPort}: {ex.Message}");
-        }
-    }
-
-    // Continuously receive and decrypt messages from the server
-    private static async Task ReceiveMessages()
-    {
-        StreamReader reader = new(stream);
-        int wrongKeyCount = 0;
-
-        while (client.Connected)
-        {
-            try
-            {
-                // Read one newline-delimited message at a time (bounded length)
-                string line = await ProtocolLimits.ReadBoundedLineAsync(reader, ProtocolLimits.MaxLineChars);
-
-                // Exit the loop if the server closes the connection
-                if (line == null) break;
-
-                switch (MessageRules.TryDecrypt(line.Trim(), encryptionKey, out string plainText))
-                {
-                    case DecryptStatus.Ok:
-                        AddSystemMessage(MessageRules.SanitizeForDisplay(plainText));
-                        break;
-                    case DecryptStatus.WrongKey:
-                        // Show on the first failure and then every 10th; never disconnect
-                        if (wrongKeyCount++ % 10 == 0)
-                            AddSystemMessage("Could not decrypt a message: the shared key is probably wrong (or the sender uses an older version).");
-                        break;
-                    default:
-                        AddSystemMessage("Malformed message ignored.");
-                        break;
-                }
-            }
-            catch (InvalidDataException)
-            {
-                AddSystemMessage("Received an over-length line from the server; stopping.");
-                break;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error receiving message: {ex.Message}");
-                break;
-            }
-        }
-    }
-
-    // Adds a line to the message list and redraws, so it is not wiped by the next redraw
-    private static void AddSystemMessage(string text)
-    {
-        lock (messages)
-        {
-            messages.Add(text);
-            DisplayMessages();
-            DisplayInputLine();
-        }
-    }
-
-    // Encrypt and send a message to the server
-    private static void SendMessage(string message)
-    {
-        if (!string.IsNullOrWhiteSpace(message))
-        {
-            try
-            {
-                string cipherText = AESecureString.EncryptString(message, encryptionKey);
-                byte[] buffer = Encoding.ASCII.GetBytes(cipherText + "\n");
-                stream?.WriteAsync(buffer, 0, buffer.Length);
-
-                lock (messages)
-                {
-                    messages.Add(message);
-                }
-
-                currentInput = "";
-                currentCursorPosition = 0;
-
-                DisplayMessages();
-                DisplayInputLine();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error sending message: {ex.Message}");
-            }
-        }
-    }
-
-    // Update the console to display the input line for user messages
-    private static void DisplayInputLine()
-    {
-        Console.SetCursorPosition(0, Console.WindowHeight - 1);
-        Console.Write("Enter Message: " + currentInput.PadRight(Console.WindowWidth - "Enter Message: ".Length - 1));
-        Console.SetCursorPosition("Enter Message: ".Length + currentCursorPosition, Console.WindowHeight - 1);
-    }
-
-    // Clear the console and display the most recent chat messages
-    private static void DisplayMessages()
-    {
-        Console.Clear();
-
-        int maxMessagesToShow = Console.WindowHeight - 2;
-
-        lock (messages)
-        {
-            var recentMessages = messages.Skip(Math.Max(0, messages.Count - maxMessagesToShow)).ToList();
-            for (int i = 0; i < recentMessages.Count; i++)
-            {
-                Console.SetCursorPosition(0, i);
-                Console.WriteLine(recentMessages[i].PadRight(Console.WindowWidth));
-            }
-        }
-    }
-
-    // Capture and process user input for sending messages
-    private static string GetUserInput()
-    {
-        DisplayInputLine();
-        currentInput = "";
-
-        while (true)
-        {
-            ConsoleKeyInfo keyInfo = Console.ReadKey(intercept: true);
-
-            if (keyInfo.Key == ConsoleKey.Enter && currentInput != "")
-                return currentInput;
-
-            switch (keyInfo.Key)
-            {
-                case ConsoleKey.Escape:
-                    Environment.Exit(0);
-                    break;
-
-                case ConsoleKey.Backspace:
-                    if (currentCursorPosition > 0)
-                    {
-                        currentInput = currentInput.Remove(currentCursorPosition - 1, 1);
-                        currentCursorPosition--;
-                    }
-                    break;
-
-                case ConsoleKey.Delete:
-                    if (currentCursorPosition < currentInput.Length)
-                    {
-                        currentInput = currentInput.Remove(currentCursorPosition, 1);
-                    }
-                    break;
-
-                case ConsoleKey.Home:
-                    currentCursorPosition = 0;
-                    break;
-
-                case ConsoleKey.End:
-                    currentCursorPosition = currentInput.Length;
-                    break;
-
-                case ConsoleKey.LeftArrow:
-                    if (currentCursorPosition > 0) currentCursorPosition--;
-                    break;
-
-                case ConsoleKey.RightArrow:
-                    if (currentCursorPosition < currentInput.Length) currentCursorPosition++;
-                    break;
-
+                case CommandKind.Quit: session.Quit(); break;
+                case CommandKind.Unknown: session.ShowStatus("Unknown command. The only command is /quit (start a message with // to send a literal /)."); break;
                 default:
-                    if (!char.IsControl(keyInfo.KeyChar) && currentInput.Length < ProtocolLimits.MaxMessageChars)
+                    string text = Commands.Parse(line).Arg;
+                    string error = session.Send(text);
+                    if (error != null) session.ShowStatus(error);
+                    break;
+            }
+        }
+
+        EndReason reason = await session.Completion;
+        Redraw();
+        lock (ui) { Console.SetCursorPosition(0, Console.WindowHeight - 1); Console.Write("Press any key to exit".PadRight(Math.Max(21, Console.WindowWidth - 1))); }
+        Console.ReadKey(intercept: true);
+        Console.Clear();
+        return ChatSession.IsFailure(reason) ? 1 : 0;
+    }
+
+    // ---- code entry ----
+
+    // Handle (shown to the other user), then the secret key twice (masked). Null if Esc is pressed.
+    private static (string Handle, string Code)? PromptEntry()
+    {
+        Console.Clear();
+        string handle;
+        while (true)
+        {
+            handle = ReadEntry("Enter handle: ", echo: true);
+            if (handle == null) return null;
+            string problem = MessageRules.ValidateHandle(handle);
+            if (problem == null) break;
+            Console.WriteLine(problem);
+        }
+        while (true)
+        {
+            string first = ReadEntry("Secret key: ", echo: false);
+            if (first == null) return null;
+            string problem = PairCode.Validate(PairCode.Normalize(first));
+            if (problem != null) { Console.WriteLine(problem); continue; }
+            string second = ReadEntry("Type it again: ", echo: false);
+            if (second == null) return null;
+            problem = PairCode.CheckEntry(first, second, out string normalized);
+            if (problem == null) return (handle, normalized);
+            Console.WriteLine(problem);
+        }
+    }
+
+    // Reads a line; echo = false shows '*' instead of the characters. Returns null if Esc is pressed.
+    private static string ReadEntry(string prompt, bool echo)
+    {
+        Console.Write(prompt);
+        StringBuilder sb = new();
+        while (true)
+        {
+            ConsoleKeyInfo k = Console.ReadKey(intercept: true);
+            if (k.Key == ConsoleKey.Enter) { Console.WriteLine(); return sb.ToString(); }
+            if (k.Key == ConsoleKey.Escape) { Console.WriteLine(); return null; }
+            if (k.Key == ConsoleKey.Backspace) { if (sb.Length > 0) { sb.Length--; Console.Write("\b \b"); } continue; }
+            if (!char.IsControl(k.KeyChar) && sb.Length < ProtocolLimits.MaxCodeChars + 20)
+            {
+                sb.Append(k.KeyChar);
+                Console.Write(echo ? k.KeyChar : '*');
+            }
+        }
+    }
+
+    // ---- input line ----
+
+    // Returns a completed line (Enter) or null. Esc ends the chat through the session, outside the ui lock.
+    private static string HandleKey(ConsoleKeyInfo k)
+    {
+        string done = null;
+        bool quit = false;
+        lock (ui)
+        {
+            switch (k.Key)
+            {
+                case ConsoleKey.Enter: if (currentInput.Length > 0) { done = currentInput; currentInput = ""; cursor = 0; } break;
+                case ConsoleKey.Escape: quit = true; break;
+                case ConsoleKey.Backspace: { int n = MessageRules.BackspaceLength(currentInput, cursor); if (n > 0) { currentInput = currentInput.Remove(cursor - n, n); cursor -= n; } break; }
+                case ConsoleKey.Delete: if (cursor < currentInput.Length) currentInput = currentInput.Remove(cursor, 1); break;
+                case ConsoleKey.Home: cursor = 0; break;
+                case ConsoleKey.End: cursor = currentInput.Length; break;
+                case ConsoleKey.LeftArrow: if (cursor > 0) cursor--; break;
+                case ConsoleKey.RightArrow: if (cursor < currentInput.Length) cursor++; break;
+                default:
+                    if (!char.IsControl(k.KeyChar) && currentInput.Length < ProtocolLimits.MaxMessageChars)
                     {
-                        currentInput = currentInput.Insert(currentCursorPosition, keyInfo.KeyChar.ToString());
-                        currentCursorPosition++;
+                        currentInput = currentInput.Insert(cursor, k.KeyChar.ToString());
+                        cursor++;
                     }
                     break;
             }
-
-            DisplayInputLine();
         }
+        if (quit) { session.Quit(); return null; }
+        Redraw();
+        return done;
     }
 
-    // Handles cleanup tasks when the application exits
-    private static void HandleExit(object sender, ConsoleCancelEventArgs e)
-    {
-        e.Cancel = true; // Prevent abrupt termination
-        OnProcessExit();
-        Environment.Exit(0);
-    }
+    // ---- drawing ----
 
-    // Notify the server of disconnection and release resources
-    private static void OnProcessExit()
+    // Takes its data from the session first, then draws under the ui lock (so the session is never called with it held).
+    private static void Redraw()
     {
-        if (client.Connected)
+        if (session == null) return;
+        List<string> lines = session.SnapshotLines();
+        SessionState state = session.State;
+        lock (ui)
         {
-            SendMessage($"{userName} has Disconnected");
-            client.Close();
+            try
+            {
+                Console.Clear();
+                int width = Math.Max(10, Console.WindowWidth - 1);
+                Console.SetCursorPosition(0, 0);
+                Console.Write(Truncate("CipherChat | end-to-end encrypted | /quit or Esc to leave" + (state == SessionState.Chatting ? " | connected" : ""), width));
+
+                int maxRows = Math.Max(1, Console.WindowHeight - 3);
+                List<string> rows = new();
+                foreach (string line in lines.TakeLast(maxRows))
+                    rows.AddRange(Wrap(MessageRules.SanitizeForDisplay(line), width));
+                foreach (var (row, i) in rows.TakeLast(maxRows).Select((r, i) => (r, i)))
+                {
+                    Console.SetCursorPosition(0, i + 1);
+                    Console.Write(row);
+                }
+                const string prompt = "Enter Message: ";
+                Console.SetCursorPosition(0, Console.WindowHeight - 1);
+                Console.Write(prompt + Truncate(currentInput, Math.Max(0, width - prompt.Length)).PadRight(Math.Max(0, width - prompt.Length)));
+                Console.SetCursorPosition(Math.Min(prompt.Length + cursor, width), Console.WindowHeight - 1);
+            }
+            catch (IOException) { }
+            catch (ArgumentOutOfRangeException) { }   // the terminal was resized mid-draw; the watcher redraws
         }
-        
-        Console.Clear();
+    }
+
+    private static IEnumerable<string> Wrap(string text, int width)
+    {
+        if (text.Length <= width) { yield return text; yield break; }
+        while (text.Length > width)
+        {
+            int cut = text.LastIndexOf(' ', width - 1, width);
+            if (cut <= 0) cut = width;
+            yield return text[..cut];
+            text = text[cut..].TrimStart(' ');
+        }
+        if (text.Length > 0) yield return text;
+    }
+
+    private static string Truncate(string text, int width) => text.Length <= width ? text : text[..width];
+
+    // A terminal resize raises no key event; poll the size and redraw when it changes.
+    private static async Task WatchResize()
+    {
+        int w = Console.WindowWidth, h = Console.WindowHeight;
+        while (session == null || !session.IsEnded)
+        {
+            await Task.Delay(300);
+            try
+            {
+                if (Console.WindowWidth != w || Console.WindowHeight != h) { w = Console.WindowWidth; h = Console.WindowHeight; Redraw(); }
+            }
+            catch (IOException) { }
+        }
     }
 }
