@@ -115,7 +115,6 @@ public sealed class ChatSession : IDisposable
     public async Task StartAsync()
     {
         SetState(SessionState.Preparing);
-        AddLine("* Checking the code...");
         try
         {
             rid = options.RidOverride ?? await Task.Run(() => PairCode.DeriveRid(code));
@@ -251,7 +250,7 @@ public sealed class ChatSession : IDisposable
                 if (state == SessionState.Connecting)
                 {
                     SetState(SessionState.Waiting);
-                    AddLine("* Waiting for the other person...");
+                    AddLine("* Waiting for the other connection...");
                     AddLine("* Both of you must type exactly the same secret key. Esc cancels.");
                 }
                 break;
@@ -283,7 +282,9 @@ public sealed class ChatSession : IDisposable
             cpace = new CPace(ev.Role, code, rid, ownNonce, peerNonce);
             byte[] y = cpace.CreateKeyMessage();
             SetState(SessionState.Handshaking);
-            AddLine("* Other person found. Verifying...");
+            AddLine("* Other person found.");
+            AddLine("* Connecting...");
+            AddLine("* Verifying...");
             WriteLine(ClientFrame.Key(y));
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException)

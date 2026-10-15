@@ -117,7 +117,7 @@ public class ChatSessionTests : IDisposable
         Wait.For(() => a.State == SessionState.Waiting && b.State == SessionState.Waiting, "both waiting");
         Assert.Equal(2, server.WaiterCount);
         Wait.Never(() => a.IsEnded || b.IsEnded || a.State == SessionState.Handshaking, "a wrong code ended or paired", 1500);
-        Assert.True(Has(a, "Waiting for the other person..."));
+        Assert.True(Has(a, "Waiting for the other connection..."));
         Assert.DoesNotContain(a.SnapshotLines(), l => l.Contains("securely") || l.Contains("minutes"));
         a.Quit(); b.Quit();                                   // Esc / quit still works while waiting
         Assert.Equal(EndReason.UserQuit, await a.Completion);
@@ -244,6 +244,109 @@ public class ChatSessionTests : IDisposable
         a.Send("ping");
         Wait.For(() => Has(a, "Them: pong"), "reentrant reply");
         Assert.Null(reply);
+    }
+
+    private ChatSession WithHandle(string handle, string rid = "aabbcc")
+    {
+        var s = new ChatSession("localhost", server.Port, Code, new ChatSessionOptions { RidOverride = rid, Handle = handle });
+        toDispose.Add(s);
+        return s;
+    }
+
+    [Fact]
+    public async Task Handles_AreExchangedInsideTheEncryptedSession_AndShownOnBothSides()
+    {
+        Server();
+        var a = WithHandle("Anna"); var b = WithHandle("bob_2");
+        await a.StartAsync(); await b.StartAsync();
+        Wait.For(() => Has(a, "bob_2 is in the chat.") && Has(b, "Anna is in the chat."), "handles exchanged");
+        Assert.Null(a.Send("hello"));
+        Wait.For(() => Has(b, "Anna: hello"), "b sees the handle");
+        Assert.Null(b.Send("hi"));
+        Wait.For(() => Has(a, "bob_2: hi"), "a sees the handle");
+        Assert.True(Has(a, "You: hello"));
+        Assert.DoesNotContain(a.SnapshotLines(), l => l.StartsWith("Them:"));
+        a.Quit();
+        Assert.Equal(EndReason.PeerLeft, await b.Completion.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(Has(b, "Anna left the chat."));
+    }
+
+    [Fact]
+    public async Task PeerDisconnect_NamesThePeer()
+    {
+        Server();
+        var a = WithHandle("Anna"); var b = WithHandle("bob");
+        await a.StartAsync(); await b.StartAsync();
+        Wait.For(() => Has(b, "Anna is in the chat."), "handle");
+        a.Dispose();
+        Assert.Equal(EndReason.PeerDisconnected, await b.Completion.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(Has(b, "Anna disconnected."));
+    }
+
+    [Fact]
+    public async Task WithoutAHandle_ThePeerIsShownAsThem_AndNothingIsInvented()
+    {
+        Server();
+        var a = WithHandle("Anna"); var b = NewSession();       // b sends no handle
+        await a.StartAsync(); await b.StartAsync();
+        Wait.For(() => a.State == SessionState.Chatting && b.State == SessionState.Chatting, "chatting");
+        b.Send("hi");
+        Wait.For(() => Has(a, "Them: hi"), "neutral label");
+        Assert.DoesNotContain(a.SnapshotLines(), l => l.Contains("is in the chat"));
+        Wait.For(() => Has(b, "Anna is in the chat."), "b still learns a's handle");
+    }
+
+    [Fact]
+    public async Task EqualHandles_FallBackToTheNeutralLabel()
+    {
+        Server();
+        var a = WithHandle("Sam"); var b = WithHandle("sam");
+        await a.StartAsync(); await b.StartAsync();
+        Wait.For(() => a.State == SessionState.Chatting && b.State == SessionState.Chatting, "chatting");
+        a.Send("x");
+        Wait.For(() => Has(b, "Them: x"), "duplicate handle ignored");
+        Assert.DoesNotContain(b.SnapshotLines(), l => l.Contains("is in the chat"));
+    }
+
+    [Fact]
+    public void Constructor_RejectsAnInvalidHandle()
+    {
+        Assert.Throws<ArgumentException>(() => new ChatSession("localhost", 1, Code, new ChatSessionOptions { Handle = "bad name" }));
+        Assert.Throws<ArgumentException>(() => new ChatSession("localhost", 1, Code, new ChatSessionOptions { Handle = "you" }));
+    }
+
+    [Fact]
+    public async Task StatusLines_AppearInTheAgreedOrder_EachOnItsOwnLine()
+    {
+        Server();
+        var a = WithHandle("Anna");
+        await a.StartAsync();
+        Wait.For(() => a.State == SessionState.Waiting, "waiting");
+        Assert.Equal(new[]
+        {
+            "* Connecting...",
+            "* Waiting for the other connection...",
+            "* Both of you must type exactly the same secret key. Esc cancels.",
+        }, a.SnapshotLines());
+
+        var b = WithHandle("bob");
+        await b.StartAsync();
+        Wait.For(() => a.State == SessionState.Chatting && b.State == SessionState.Chatting && Has(a, "bob is in the chat.") && Has(b, "Anna is in the chat."), "chatting");
+        Assert.Equal(new[]
+        {
+            "* Connecting...",
+            "* Waiting for the other connection...",
+            "* Both of you must type exactly the same secret key. Esc cancels.",
+            "* Other person found.",
+            "* Connecting...",
+            "* Verifying...",
+            "* Secure session established.",
+            "* bob is in the chat.",
+        }, a.SnapshotLines());
+        // the second person never waited
+        Assert.Equal(new[] { "* Connecting...", "* Other person found.", "* Connecting...", "* Verifying...", "* Secure session established.", "* Anna is in the chat." },
+            b.SnapshotLines());
+        Assert.DoesNotContain(a.SnapshotLines(), l => l.Contains("Checking the code") || l.Contains('\n'));
     }
 
     [Fact]
