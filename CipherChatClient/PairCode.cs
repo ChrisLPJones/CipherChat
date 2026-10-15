@@ -57,6 +57,17 @@ public static class PairCode
         return null;
     }
 
+    // Checks the two typed entries. Returns null and the normalized code when they match and pass the rules,
+    // otherwise the reason in plain words (the rules come first so a weak code is explained before a typo is).
+    public static string CheckEntry(string first, string second, out string normalized)
+    {
+        normalized = Normalize(first);
+        string problem = Validate(normalized);
+        if (problem != null) return problem;
+        if (normalized != Normalize(second)) return "The two entries do not match. Please try again.";
+        return null;
+    }
+
     // rid = first 3 bytes of Argon2id(code, salt = first 16 bytes of SHA-256("CipherChat-v5/rid" || 0x00)), as 6 lowercase hex chars.
     public static string DeriveRid(string normalized)
     {

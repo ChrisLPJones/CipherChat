@@ -77,6 +77,9 @@ public sealed class ChatSession : IDisposable
     public event Action<SessionState> StateChanged;
     public event Action<EndReason> Ended;
 
+    // Shows a local status line ("* ..."); never sent anywhere.
+    public void ShowStatus(string text) => AddLine("* " + MessageRules.SanitizeForDisplay(text));
+
     public List<string> SnapshotLines() { lock (lines) return lines.ToList(); }
 
     public static string Describe(EndReason reason) => reason switch
@@ -300,7 +303,7 @@ public sealed class ChatSession : IDisposable
                     cpace.Dispose();
                     cpace = null;
                     SetState(SessionState.Chatting);
-                    AddLine("* Connected. The other person proved they know the code.");
+                    AddLine("* Secure session established. The other person proved they know the code.");
                     break;
                 default:
                     // MSG before the handshake finished, GONE, ERR, a second PAIRED/WAIT: all the same failure.
