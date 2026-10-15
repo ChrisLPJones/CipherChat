@@ -127,6 +127,7 @@ public sealed class ChatSession : IDisposable
         try
         {
             await tcp.ConnectAsync(host, port).WaitAsync(TimeSpan.FromMilliseconds(options.ConnectTimeoutMs));
+            AddLine("* Connected.");
             stream = tcp.GetStream();
             reader = new StreamReader(stream, Encoding.ASCII);
             ownNonce = RandomNumberGenerator.GetBytes(CPace.NonceBytes);
@@ -251,7 +252,6 @@ public sealed class ChatSession : IDisposable
                 {
                     SetState(SessionState.Waiting);
                     AddLine("* Waiting for the other connection...");
-                    AddLine("* Both of you must type exactly the same secret key. Esc cancels.");
                 }
                 break;
             case ServerEventKind.Paired:
@@ -283,7 +283,6 @@ public sealed class ChatSession : IDisposable
             byte[] y = cpace.CreateKeyMessage();
             SetState(SessionState.Handshaking);
             AddLine("* Other person found.");
-            AddLine("* Connecting...");
             AddLine("* Verifying...");
             WriteLine(ClientFrame.Key(y));
         }

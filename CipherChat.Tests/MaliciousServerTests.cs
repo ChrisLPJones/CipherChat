@@ -86,6 +86,7 @@ public class MaliciousServerTests : IDisposable
     {
         Assert.Equal(EndReason.SecurityFailure, r.S.Completion.WaitAsync(TimeSpan.FromSeconds(5)).Result);
         Assert.True(Has(r.S, "Could not connect securely"));
+        Thread.Sleep(150);                                         // let lines the client wrote before failing reach the scripted server
         int sent = r.Srv.Received.Count;
         Thread.Sleep(200);
         Assert.Equal(sent, r.Srv.Received.Count);                  // nothing more after the failure

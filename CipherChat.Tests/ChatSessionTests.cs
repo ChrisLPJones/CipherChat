@@ -325,8 +325,8 @@ public class ChatSessionTests : IDisposable
         Assert.Equal(new[]
         {
             "* Connecting...",
+            "* Connected.",
             "* Waiting for the other connection...",
-            "* Both of you must type exactly the same secret key. Esc cancels.",
         }, a.SnapshotLines());
 
         var b = WithHandle("bob");
@@ -335,16 +335,15 @@ public class ChatSessionTests : IDisposable
         Assert.Equal(new[]
         {
             "* Connecting...",
+            "* Connected.",
             "* Waiting for the other connection...",
-            "* Both of you must type exactly the same secret key. Esc cancels.",
             "* Other person found.",
-            "* Connecting...",
             "* Verifying...",
             "* Secure session established.",
             "* bob is in the chat.",
         }, a.SnapshotLines());
         // the second person never waited
-        Assert.Equal(new[] { "* Connecting...", "* Other person found.", "* Connecting...", "* Verifying...", "* Secure session established.", "* Anna is in the chat." },
+        Assert.Equal(new[] { "* Connecting...", "* Connected.", "* Other person found.", "* Verifying...", "* Secure session established.", "* Anna is in the chat." },
             b.SnapshotLines());
         Assert.DoesNotContain(a.SnapshotLines(), l => l.Contains("Checking the code") || l.Contains('\n'));
     }
